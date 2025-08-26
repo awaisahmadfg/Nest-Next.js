@@ -14,6 +14,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ERROR_MESSAGES } from 'src/common/constants';
 import { EmailService } from '../email/email.service';
 import { ResetPasswordDto } from '../email/dto/reset-password.dto';
+import { OAuth2Client } from 'google-auth-library';
 
 @Injectable()
 export class AuthService {
@@ -23,18 +24,34 @@ export class AuthService {
     private configService: ConfigService,
     private prisma: PrismaService,
     private emailService: EmailService,
+    private googleClient: OAuth2Client,
   ) {}
 
-  async register(createUserDto: CreateUserDto): Promise<UserResponseDto> {
+  async signup(createUserDto: CreateUserDto) {
     const user = await this.usersService.createUser({
       ...createUserDto,
     });
 
-    return new UserResponseDto(user);
+    const payload = { email: user.email, sub: user.id, role: user.role };
+
+    const accessToken = this.jwtService.sign(payload);
+    const refreshToken = this.generateRefreshToken(user);
+
+    await this.setRefreshToken(user.id, refreshToken);
+
+    return {
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+      user: new UserResponseDto(user),
+    };
   }
 
   async validateUser(email: string, password: string): Promise<UserResponseDto | null> {
     const user = await this.usersService.findUserByEmail(email.toLowerCase());
+
+    if (!user) {
+      throw new UnauthorizedException(ERROR_MESSAGES.NO_ACCOUNT_FOUND);
+    }
 
     if (user && (await bcrypt.compare(password, user.password))) {
       return new UserResponseDto(user);
@@ -207,5 +224,68 @@ export class AuthService {
     });
 
     return { message: 'Password reset successfully' };
+  }
+
+  async loginWithSSO(provider, providerToken: string) {
+    const userInfo = await this.verifySSOToken(provider, providerToken);
+
+    // Full User type
+    let user = await this.usersService.findUserResponseByEmail(userInfo.email);
+
+    if (!user) {
+      const createUserDto: CreateUserDto = {
+        email: userInfo.email,
+        password: '',
+        role: 'VIEWER',
+      };
+      const newUser = await this.usersService.createUser(createUserDto);
+      user = {
+        id: newUser.id,
+        email: newUser.email,
+        role: newUser.role,
+      };
+    }
+
+    if (!user) {
+      throw new Error('User creation failed'); // safety
+    }
+
+    // Now wrap only for response
+    const userDto = new UserResponseDto(user);
+
+    const accessToken = this.jwtService.sign({ email: user.email, sub: user.id, role: user.role });
+    const refreshToken = this.generateRefreshToken(userDto);
+    await this.setRefreshToken(user.id, refreshToken);
+
+    return {
+      user: userDto,
+      accessToken,
+      refreshToken,
+      message: 'Login successful',
+    };
+  }
+
+  private async verifySSOToken(provider, token: string): Promise<{ email: string; name: string }> {
+    if (provider !== 'google') {
+      throw new UnauthorizedException('Unsupported SSO provider');
+    }
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      const ticket = await this.googleClient.verifyIdToken({
+        idToken: token,
+        audience: this.configService.get<string>('GOOGLE_CLIENT_ID')!, // safe non-null
+      });
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
+      const payload = ticket.getPayload();
+
+      if (!payload || typeof payload.email !== 'string' || typeof payload.name !== 'string') {
+        throw new UnauthorizedException('Invalid Google token payload');
+      }
+
+      return { email: payload.email, name: payload.name };
+    } catch (err) {
+      throw new UnauthorizedException('Invalid Google token' + err);
+    }
   }
 }
