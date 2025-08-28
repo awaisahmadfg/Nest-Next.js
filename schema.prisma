@@ -1,28 +1,274 @@
-
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DEV_DATABASE_URL")
+  url      = env("DATABASE_URL")
 }
 
 model User {
-  id        Int      @id @default(autoincrement())
-  email     String   @unique
-  role      Role     
-  password  String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                     Int               @id @default(autoincrement())
+  fullName               String            @db.VarChar(255)
+  email                  String            @unique @db.VarChar(255)  
+  password               String            @db.VarChar(255)  
+  isInvited              Boolean           @default(false)
+  userRoles              UserRole[]
+  assignedRoles          UserRole[]        @relation("RoleAssignment") // Roles this user GAVE to others
+  assignedBy             Int?   // ID of the user who assigned this role
+  attachmentsLink        String[]
+  profileStatus          UserProfileStatus @default(PENDING)
+  createdAt              DateTime          @default(now())
+  updatedAt              DateTime          @updatedAt
+  refreshToken           String?           @unique @db.VarChar(255)
+  refreshTokenExpires    DateTime?
+  resetOtp               String?           @db.VarChar(6)
+  resetOtpExpires        DateTime?
+}
+
+model UserRole {
+  id             Int       @id @default(autoincrement())
+  userId         Int
+  role           Role
+  status         RoleStatus  @default(PENDING)
+  assignedAt     DateTime  @default(now())
+  expiresAt      DateTime?   // For time-limited roles
+  assignedBy     Int?        // User who assigned this role
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignedByUser User?     @relation("RoleAssignment", fields: [assignedBy], references: [id])
+
+  // A UserRole can have ONE of these profiles (1:1 relationship)
+  brokerProfile          BrokerProfile?
+  assetManagerProfile    AssetManagerProfile?
+  projectOwnerProfile    ProjectOwnerProfile?
+  developerProfile       DeveloperProfile?
+  lenderProfile          LenderProfile?
+  investorProfile        InvestorProfile?
+  assessorProfile        AssessorProfile?
+  appraiserProfile       AppraiserProfile?
+  insuranceRepProfile    InsuranceRepProfile?
+  
+  verification   Verification?
+
+  @@unique([userId, role])
+  @@map("User_Roles")
+}
+
+// Shared property type preferences
+model PropertyTypePreferences {
+  id               Int      @id @default(autoincrement())
+  isCommercial     Boolean?
+  isResidential    Boolean?
+  isIndustrial     Boolean?
+  isMixedUse       Boolean?
+  
+  // Relationships to profiles
+  brokerProfile          BrokerProfile?
+  assetManagerProfile    AssetManagerProfile?
+  projectOwnerProfile    ProjectOwnerProfile?
+  developerProfile       DeveloperProfile?
+  lenderProfile          LenderProfile?
+  investorProfile        InvestorProfile?
+  assessorProfile        AssessorProfile?
+  appraiserProfile       AppraiserProfile?
+  insuranceRepProfile    InsuranceRepProfile?
+  
+  @@map("Property_Type_Preferences")
+}
+
+
+// All specialization data is embedded as native arrays within each profile
+model BrokerProfile {
+  id               Int      @id @default(autoincrement())
+  userRoleId       Int      @unique
+  userRole         UserRole @relation(fields: [userRoleId], references: [id])
+  licenseNumber    String?
+  professionalAssosciationId String? @unique
+  companyName      String?
+  companyAreaZone  String?
+  professionalExperience String?
+  propertyTypePreferencesId Int? @unique
+  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  attachmentsLink        String[]
+
+  @@map("Broker_Profiles")
+}
+
+model AssetManagerProfile {
+  id               Int      @id @default(autoincrement())
+  userRoleId       Int      @unique
+  userRole         UserRole @relation(fields: [userRoleId], references: [id])
+  companyName      String?
+  companyAreaZone  String?
+  propertyTypePreferencesId Int? @unique
+  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  attachmentsLink        String[]
+  
+  @@map("Asset_Manager_Profiles")
+}
+model DeveloperProfile {
+  id               Int      @id @default(autoincrement())
+  userRoleId       Int      @unique
+  userRole         UserRole @relation(fields: [userRoleId], references: [id])
+  licenseNumber    String?
+  companyName      String?
+  companyAreaZone  String?
+  propertyTypePreferencesId Int? @unique
+  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  attachmentsLink        String[]
+
+  @@map("Developer_Profiles")
+}
+
+model ProjectOwnerProfile {
+  id               Int      @id @default(autoincrement())
+  userRoleId       Int      @unique
+  userRole         UserRole @relation(fields: [userRoleId], references: [id])
+  licenseNumber    String?
+  companyName      String?
+  companyAreaZone  String?
+  propertyTypePreferencesId Int? @unique
+  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  attachmentsLink        String[]
+
+  @@map("Property_Manager_Profiles")
+}
+
+model LenderProfile {
+  id               Int      @id @default(autoincrement())
+  userRoleId       Int      @unique
+  userRole         UserRole @relation(fields: [userRoleId], references: [id])
+  licenseNumber    String?
+  companyName      String?
+  propertyTypePreferencesId Int? @unique
+  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  attachmentsLink        String[]
+  
+  @@map("Lender_Profiles")
+}
+
+model InvestorProfile {
+  id               Int      @id @default(autoincrement())
+  userRoleId       Int      @unique
+  userRole         UserRole @relation(fields: [userRoleId], references: [id])
+  companyName      String?
+  propertyTypePreferencesId Int? @unique
+  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  attachmentsLink        String[]
+
+  @@map("Investor_Profiles")
+}
+
+model AssessorProfile {
+  id               Int      @id @default(autoincrement())
+  userRoleId       Int      @unique
+  userRole         UserRole @relation(fields: [userRoleId], references: [id])
+  licenseNumber    String?
+  companyName      String?
+  professionalExperience String?
+  propertyTypePreferencesId Int? @unique
+  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  attachmentsLink        String[]
+
+  @@map("Assessor_Profiles")
+}
+
+model AppraiserProfile {
+  id               Int      @id @default(autoincrement())
+  userRoleId       Int      @unique
+  userRole         UserRole @relation(fields: [userRoleId], references: [id])
+  licenseNumber    String?
+  companyName      String?
+  professionalExperience String?
+  propertyTypePreferencesId Int? @unique
+  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  attachmentsLink        String[]
+
+  @@map("Appraisor_Profiles")
+}
+
+model InsuranceRepProfile {
+  id               Int      @id @default(autoincrement())
+  userRoleId       Int      @unique
+  userRole         UserRole @relation(fields: [userRoleId], references: [id])
+  licenseNumber    String?
+  roleTitle       String?
+  regionsOfPractice String?
+  professionalExperience String?
+  companyAreaZone  String?
+  propertyTypePreferencesId Int? @unique
+  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  attachmentsLink        String[]
+
+  @@map("Insurance_Rep_Profiles")
+}
+
+model Verification {
+  id               Int                 @id @default(autoincrement())
+  type             VerificationType
+  status           VerificationStatus  @default(PENDING)
+  documentUrl      String?             // For deed uploads, license copies
+  licenseNumber    String?             // For license validation
+  domain           String?             // For domain validation
+  governmentEmail  String?             // For .gov email validation
+  referenceNumber  String?             // For lease reference, job code
+  verifiedAt       DateTime?
+  expiresAt        DateTime?           // For temporary verifications
+  userRoleId       Int?                @unique
+  userRole         UserRole?           @relation(fields: [userRoleId], references: [id])
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  @@map("Verifications")
+}
+
+enum VerificationType {
+  DEED
+  LICENSE
+  DOMAIN
+  GOVERNMENT_EMAIL
+  LEASE
+  JOB_CODE
+  REFERENCE_NUMBER
+  MANUAL_APPROVAL
+}
+
+enum UserProfileStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum RoleStatus {
+  PENDING
+  ACTIVE
+  REJECTED
+  EXPIRED
+}
+
+enum VerificationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
 }
 
 enum Role {
   SUPER_ADMIN
   ADMIN
-  BROKER
+  PROJECT_OWNER
+  DEVELOPER
+  ASSET_MANAGER
+  PROPERTY_MANAGER
+  BUYER
+  SELLER
+  LENDER
+  INVESTOR
+  ASSESSOR
+  APPRAISER
   INSPECTOR
-  CONTRACTOR
-  GOV_OFFICIAL  
+  BROKER
+  INSURANCE_REP
+  GOVERNMENT_OFFICIAL
   VIEWER
 }
