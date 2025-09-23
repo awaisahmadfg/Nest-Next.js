@@ -1,12 +1,10 @@
 generator client {
   provider = "prisma-client-js"
 }
-
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
-
 model User {
   id                     Int               @id @default(autoincrement())
   fullName               String            @db.VarChar(255)
@@ -20,12 +18,18 @@ model User {
   profileStatus          UserProfileStatus @default(PENDING)
   createdAt              DateTime          @default(now())
   updatedAt              DateTime          @updatedAt
-  refreshToken           String?           @unique @db.VarChar(255)
+  refreshToken           String?           @unique @db.VarChar(250)
   refreshTokenExpires    DateTime?
   resetOtp               String?           @db.VarChar(6)
   resetOtpExpires        DateTime?
+  onboardingProgress     Int               @default(1)
+  createdProperties      Property[]        // Reverse relation for Property.createdBy
+  lastUsedRoleId         Int?
+  userProperties         PropertyUser[]
+  sentInvitations        UserInvite[] @relation("UserSentPropertyInvites")
+  receivedInvitations    UserInvite[] @relation("UserReceivedPropertyInvites")
+  lastUsedRole           UserRole? @relation("UserLastUsedRole", fields: [lastUsedRoleId], references: [id])
 }
-
 model UserRole {
   id             Int       @id @default(autoincrement())
   userId         Int
@@ -36,74 +40,198 @@ model UserRole {
   assignedBy     Int?        // User who assigned this role
   user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   assignedByUser User?     @relation("RoleAssignment", fields: [assignedBy], references: [id])
+  lastUsedBy     User[]      @relation("UserLastUsedRole")
+  denyReason     String?     // should only be populated if status = REJECTED
 
   // A UserRole can have ONE of these profiles (1:1 relationship)
   brokerProfile          BrokerProfile?
   assetManagerProfile    AssetManagerProfile?
-  projectOwnerProfile    ProjectOwnerProfile?
+  propertyOwnerProfile   PropertyOwnerProfile?
   developerProfile       DeveloperProfile?
   lenderProfile          LenderProfile?
   investorProfile        InvestorProfile?
   assessorProfile        AssessorProfile?
   appraiserProfile       AppraiserProfile?
   insuranceRepProfile    InsuranceRepProfile?
-  
   verification   Verification?
-
+  propertyUsers  PropertyUser[] 
   @@unique([userId, role])
   @@map("User_Roles")
 }
+  model Property {
+    id           Int           @id @default(autoincrement())  // <— simple int PK
+    propertyId   String        @unique // Custom ID from form
+    type         PropertiesType
+    name         String
+    address      String
+    area         Decimal @default(0)
+    grossArea    Decimal @default(0)
+    yearBuilt    Int     @default(1900)
+    assetType     PropertyAssetType?
+    createdAt    DateTime      @default(now())
+    updatedAt    DateTime      @updatedAt
+    documentsCID  String?      @db.VarChar(255)  // CID for the uploaded documents
+    // Relations
+    createdById  Int  // User ID of the creator
+    createdBy    User          @relation(fields: [createdById], references: [id]) // All properties created by that user
+    invites       UserInvite[] // Reverse relation: invites pointing to this property
+    propertyUsers PropertyUser[]
+    attachments   Attachment[] 
+    documents    PropertyDocument[]
+    @@map("Properties")
+  }
+
+model PropertyAssetType {
+  id                      Int       @id @default(autoincrement())
+  isIndustrial            Boolean   @default(false)
+  isMultiFamily           Boolean   @default(false)
+  isRetail                Boolean   @default(false)
+  isOffice                Boolean   @default(false)
+  isGsa                   Boolean   @default(false)
+  isLandAndDevelopment    Boolean   @default(false)
+
+  propertyId    Int       @unique
+  property      Property  @relation(fields: [propertyId], references: [id])
+
+  @@map("Property_Asset_Type")
+}
+
+  model UserInvite {
+    id           Int           @id @default(autoincrement())
+    email        String
+    roles         Role[]
+    status       InviteStatus  @default(PENDING)
+    acceptedAt   DateTime?
+    createdAt    DateTime      @default(now())
+    invitedUserId Int?        // NEW (recipient FK, optional)
+    invitedUser   User?       @relation("UserReceivedPropertyInvites", fields: [invitedUserId], references: [id])
+    // who invited
+    invitedById  Int
+    invitedBy    User          @relation("UserSentPropertyInvites", fields: [invitedById], references: [id], onDelete: Cascade)
+    // link to a property (optional)
+    propertyId   Int?
+    property     Property?     @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+    @@index([email, status])
+    @@map("User_Invite")
+  }  
+  model PropertyDocument {
+    id          Int      @id @default(autoincrement())
+    propertyId  Int
+    property    Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+    documentsCID  String
+    name        String
+    documentType        String   @db.VarChar(100) // MIME or logical type
+    createdAt   DateTime @default(now())
+    updatedAt   DateTime @updatedAt
+
+    @@map("Property_Documents")
+      }
 
 // Shared property type preferences
-model PropertyTypePreferences {
+model PropertyType {
   id               Int      @id @default(autoincrement())
-  isCommercial     Boolean?
-  isResidential    Boolean?
   isIndustrial     Boolean?
-  isMixedUse       Boolean?
+  isMultiFamily     Boolean?
+  isRetail   Boolean?
+  isOffice     Boolean?
+  isLandAndDevelopment      Boolean?
+  isGSA      Boolean?
+  
+  // Relationships to profiles
+  assetManagerProfile    AssetManagerProfile?
+  
+  @@map("Property_Type")
+}
+model SpecializationType {
+  id               Int      @id @default(autoincrement())
+  isIndustrial     Boolean?
+  isMultiFamily     Boolean?
+  isRetail   Boolean?
+  isOffice     Boolean?
+  isLandAndDevelopment      Boolean?
+  isGSA      Boolean?
   
   // Relationships to profiles
   brokerProfile          BrokerProfile?
-  assetManagerProfile    AssetManagerProfile?
-  projectOwnerProfile    ProjectOwnerProfile?
-  developerProfile       DeveloperProfile?
-  lenderProfile          LenderProfile?
-  investorProfile        InvestorProfile?
   assessorProfile        AssessorProfile?
   appraiserProfile       AppraiserProfile?
-  insuranceRepProfile    InsuranceRepProfile?
   
-  @@map("Property_Type_Preferences")
+  @@map("Specialization_Type")
 }
-
-
+model ConstructionCategory {
+  id               Int      @id @default(autoincrement())
+  isIndustrial     Boolean?
+  isMultiFamily     Boolean?
+  isRetail   Boolean?
+  isOffice     Boolean?
+  isLandAndDevelopment      Boolean?
+  isGSA      Boolean?
+  
+  // Relationships to profiles
+  propertyOwnerProfile    PropertyOwnerProfile?
+  developerProfile       DeveloperProfile?
+  
+  @@map("Construction_Category")
+}
+model InvestmentInterest {
+  id               Int      @id @default(autoincrement())
+  isIndustrial     Boolean?
+  isMultiFamily     Boolean?
+  isRetail   Boolean?
+  isOffice     Boolean?
+  isLandAndDevelopment      Boolean?
+  isGSA      Boolean?
+  
+  // Relationships to profiles
+  lenderProfile    LenderProfile?
+  investorProfile       InvestorProfile?
+  
+  @@map("Investment_Interest")
+}
+model CoverageSpecializationType {
+  id               Int      @id @default(autoincrement())
+  isIndustrial     Boolean?
+  isMultiFamily     Boolean?
+  isRetail   Boolean?
+  isOffice     Boolean?
+  isLandAndDevelopment      Boolean?
+  isGSA      Boolean?
+  
+  // Relationships to profiles
+  insuranceRepProfile   InsuranceRepProfile?
+  
+  @@map("Coverage_Specialization_Type")
+}
 // All specialization data is embedded as native arrays within each profile
 model BrokerProfile {
   id               Int      @id @default(autoincrement())
   userRoleId       Int      @unique
   userRole         UserRole @relation(fields: [userRoleId], references: [id])
   licenseNumber    String?
-  professionalAssosciationId String? @unique
+  professionalAssociationId String? @unique
   companyName      String?
-  companyAreaZone  String?
+  primaryMarket  String?
   professionalExperience String?
-  propertyTypePreferencesId Int? @unique
-  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  specializationTypeId Int? @unique
+  specializationType SpecializationType? @relation(fields: [specializationTypeId], references: [id])
   attachmentsLink        String[]
-
+  additionalInfoId Int? @unique
+  additionalInfo   UserAdditionalInfo? @relation(fields: [additionalInfoId], references: [id])
   @@map("Broker_Profiles")
+  
 }
-
 model AssetManagerProfile {
   id               Int      @id @default(autoincrement())
   userRoleId       Int      @unique
   userRole         UserRole @relation(fields: [userRoleId], references: [id])
   companyName      String?
-  companyAreaZone  String?
-  propertyTypePreferencesId Int? @unique
-  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  noOfPropertiesManaged String?
+  primaryMarket String?
+  propertyTypeId Int? @unique
+  propertyType PropertyType? @relation(fields: [propertyTypeId], references: [id])
   attachmentsLink        String[]
-  
+  additionalInfoId Int? @unique
+  additionalInfo   UserAdditionalInfo? @relation(fields: [additionalInfoId], references: [id])
   @@map("Asset_Manager_Profiles")
 }
 model DeveloperProfile {
@@ -111,98 +239,112 @@ model DeveloperProfile {
   userRoleId       Int      @unique
   userRole         UserRole @relation(fields: [userRoleId], references: [id])
   licenseNumber    String?
+  registrationNumber String?
   companyName      String?
-  companyAreaZone  String?
-  propertyTypePreferencesId Int? @unique
-  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  primaryMarket  String?
   attachmentsLink        String[]
-
+  constructionCategoryId Int? @unique
+  constructionCategory ConstructionCategory? @relation(fields: [constructionCategoryId], references: [id])
+  additionalInfoId Int? @unique
+  additionalInfo   UserAdditionalInfo? @relation(fields: [additionalInfoId], references: [id])
   @@map("Developer_Profiles")
 }
-
-model ProjectOwnerProfile {
+model PropertyOwnerProfile {
   id               Int      @id @default(autoincrement())
   userRoleId       Int      @unique
   userRole         UserRole @relation(fields: [userRoleId], references: [id])
   licenseNumber    String?
+  registrationNumber String?
   companyName      String?
-  companyAreaZone  String?
-  propertyTypePreferencesId Int? @unique
-  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  primaryMarket  String?
   attachmentsLink        String[]
-
-  @@map("Property_Manager_Profiles")
+  constructionCategoryId Int? @unique
+  constructionCategory ConstructionCategory? @relation(fields: [constructionCategoryId], references: [id])
+  additionalInfoId Int? @unique
+  additionalInfo   UserAdditionalInfo? @relation(fields: [additionalInfoId], references: [id])
+  @@map("Property_Owner_Profiles")
 }
-
 model LenderProfile {
   id               Int      @id @default(autoincrement())
   userRoleId       Int      @unique
   userRole         UserRole @relation(fields: [userRoleId], references: [id])
-  licenseNumber    String?
+  licenseNumber String?
+  registrationNumber String?
   companyName      String?
-  propertyTypePreferencesId Int? @unique
-  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
   attachmentsLink        String[]
-  
+  investmentInterestId Int? @unique
+  investmentInterest InvestmentInterest? @relation(fields: [investmentInterestId], references: [id])
+  additionalInfoId Int? @unique
+  additionalInfo   UserAdditionalInfo? @relation(fields: [additionalInfoId], references: [id])
   @@map("Lender_Profiles")
 }
-
 model InvestorProfile {
   id               Int      @id @default(autoincrement())
   userRoleId       Int      @unique
   userRole         UserRole @relation(fields: [userRoleId], references: [id])
+  licenseNumber String?
+  registrationNumber String?
   companyName      String?
-  propertyTypePreferencesId Int? @unique
-  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
   attachmentsLink        String[]
-
+  investmentInterestId Int? @unique
+  investmentInterest InvestmentInterest? @relation(fields: [investmentInterestId], references: [id])
+  additionalInfoId Int? @unique
+  additionalInfo   UserAdditionalInfo? @relation(fields: [additionalInfoId], references: [id])
   @@map("Investor_Profiles")
 }
-
 model AssessorProfile {
   id               Int      @id @default(autoincrement())
   userRoleId       Int      @unique
   userRole         UserRole @relation(fields: [userRoleId], references: [id])
+  certificateNumber String?
   licenseNumber    String?
   companyName      String?
-  professionalExperience String?
-  propertyTypePreferencesId Int? @unique
-  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  professionalAssociation String?
+  regionOfPractice String?
+  yearOfExperience String?
+  primaryMarket String?
+  specializationTypeId Int? @unique
+  specializationType SpecializationType? @relation(fields: [specializationTypeId], references: [id])
   attachmentsLink        String[]
-
+  additionalInfoId Int? @unique
+  additionalInfo   UserAdditionalInfo? @relation(fields: [additionalInfoId], references: [id])
   @@map("Assessor_Profiles")
 }
-
 model AppraiserProfile {
   id               Int      @id @default(autoincrement())
   userRoleId       Int      @unique
   userRole         UserRole @relation(fields: [userRoleId], references: [id])
+  certificateNumber String?
   licenseNumber    String?
   companyName      String?
-  professionalExperience String?
-  propertyTypePreferencesId Int? @unique
-  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  professionalAssociation String?
+  regionOfPractice String?
+  yearOfExperience String?
+  primaryMarket String?
+  specializationTypeId Int? @unique
+  specializationType SpecializationType? @relation(fields: [specializationTypeId], references: [id])
   attachmentsLink        String[]
-
-  @@map("Appraisor_Profiles")
+  additionalInfoId Int? @unique
+  additionalInfo   UserAdditionalInfo? @relation(fields: [additionalInfoId], references: [id])
+  @@map("Appraiser_Profiles")
 }
-
 model InsuranceRepProfile {
   id               Int      @id @default(autoincrement())
   userRoleId       Int      @unique
   userRole         UserRole @relation(fields: [userRoleId], references: [id])
   licenseNumber    String?
+  registrationId String?
   roleTitle       String?
   regionsOfPractice String?
-  professionalExperience String?
-  companyAreaZone  String?
-  propertyTypePreferencesId Int? @unique
-  propertyTypePreferences PropertyTypePreferences? @relation(fields: [propertyTypePreferencesId], references: [id])
+  yearsOfExperience String?
+  primaryMarket String?
+  coverageSpecializationTypeId Int? @unique
+  coverageSpecializationType CoverageSpecializationType? @relation(fields: [coverageSpecializationTypeId], references: [id])
   attachmentsLink        String[]
-
+  additionalInfoId Int? @unique
+  additionalInfo   UserAdditionalInfo? @relation(fields: [additionalInfoId], references: [id])
   @@map("Insurance_Rep_Profiles")
 }
-
 model Verification {
   id               Int                 @id @default(autoincrement())
   type             VerificationType
@@ -218,8 +360,60 @@ model Verification {
   userRole         UserRole?           @relation(fields: [userRoleId], references: [id])
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
-
   @@map("Verifications")
+}
+
+model UserAdditionalInfo {
+  id            Int      @id @default(autoincrement())
+  note          String   @db.VarChar(500)
+  userReply     String   @db.VarChar(500)
+  attachmentsLink String[]
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  // Relations  
+  brokerProfile         BrokerProfile?
+  assetManagerProfile   AssetManagerProfile?
+  developerProfile      DeveloperProfile?
+  propertyOwnerProfile  PropertyOwnerProfile?
+  lenderProfile         LenderProfile?
+  investorProfile       InvestorProfile?
+  assessorProfile       AssessorProfile?
+  appraiserProfile      AppraiserProfile?
+  insuranceRepProfile   InsuranceRepProfile?
+
+  // Ensure consistency: the userRole must belong to the specified user
+  @@map("User_Additional_Info")
+}
+
+model PropertyUser {
+  id         Int       @id @default(autoincrement())
+  propertyId Int
+  userRoleId Int
+  userId     Int
+  property   Property  @relation(fields: [propertyId], references: [id])
+  userRole   UserRole  @relation(fields: [userRoleId], references: [id])
+   user       User      @relation(fields: [userId], references: [id])
+  @@unique([propertyId, userRoleId])
+  @@map("Property_Users")
+}
+
+model Attachment {
+  id        Int      @id @default(autoincrement()) // assuming BaseEntity had an id
+  createdAt DateTime @default(now())               // BaseEntity usually adds timestamps
+  updatedAt DateTime @updatedAt
+
+  fileName  String
+  fileSize  Int
+  fileType  String
+  filePath  String
+
+
+  propertyId Int?
+  property   Property? @relation(fields: [propertyId], references: [id])
+
+
+  @@map("Attachment")
 }
 
 enum VerificationType {
@@ -232,43 +426,59 @@ enum VerificationType {
   REFERENCE_NUMBER
   MANUAL_APPROVAL
 }
-
 enum UserProfileStatus {
   PENDING
   APPROVED
   REJECTED
-}
-
+  PARTIALLY_APPROVED
+  }
 enum RoleStatus {
   PENDING
   ACTIVE
   REJECTED
   EXPIRED
+  ADDITIONAL_INFO_REQUESTED
+  ADDITIONAL_INFO_SUBMITTED
 }
-
 enum VerificationStatus {
   PENDING
   APPROVED
   REJECTED
   EXPIRED
 }
-
-enum Role {
-  SUPER_ADMIN
-  ADMIN
-  PROJECT_OWNER
-  DEVELOPER
-  ASSET_MANAGER
-  PROPERTY_MANAGER
-  BUYER
-  SELLER
-  LENDER
-  INVESTOR
-  ASSESSOR
-  APPRAISER
-  INSPECTOR
-  BROKER
-  INSURANCE_REP
-  GOVERNMENT_OFFICIAL
-  VIEWER
-}
+  enum Role {
+    SUPER_ADMIN
+    ADMIN
+    OWNER
+    PROPERTY_OWNER    
+    DEVELOPER
+    ASSET_MANAGER
+    PROPERTY_MANAGER
+    BUYER
+    SELLER
+    LENDER
+    INVESTOR
+    ASSESSOR
+    APPRAISER
+    INSPECTOR
+    BROKER
+    INSURANCE_REP
+    GOVERNMENT_OFFICIAL
+    VIEWER
+  }
+  enum InviteStatus {
+    PENDING
+    ACCEPTED
+    DECLINED
+  }
+  enum PropertyRole {
+    ADMIN
+    MANAGER
+    MEMBER
+  }
+  enum PropertiesType {
+    RESIDENTIAL
+    COMMERCIAL
+    INDUSTRIAL
+    MIXED_USE
+  }
