@@ -89,7 +89,7 @@ export class PinataService {
 
       // Extract file extension and determine MIME type
       const fileExtension = fileName.split('.').pop()?.toLowerCase();
-      let mimeType = 'application/octet-stream'; // default
+      let mimeType = 'application/octet-stream';
 
       // Map property-related file extensions to MIME types
       const mimeTypeMap: { [key: string]: string } = {
