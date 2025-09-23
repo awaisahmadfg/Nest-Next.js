@@ -1,17 +1,13 @@
 import {
   Controller,
   Post,
-  UseInterceptors,
-  UploadedFiles,
   Body,
   UseGuards,
   BadRequestException,
   InternalServerErrorException,
   Logger,
 } from '@nestjs/common';
-import { FilesInterceptor } from '@nestjs/platform-express';
 import { PinataService } from './pinata.service';
-import { UploadFilesDto } from './dto/upload-files.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
 import { UploadedFileMetadata } from './types/pinata.types';
@@ -28,102 +24,6 @@ export class PinataController {
 
   @Post('upload')
   @UseGuards(JwtAuthGuard)
-  @UseInterceptors(
-    FilesInterceptor('files', 20, {
-      limits: { fileSize: 10 * 1024 * 1024 },
-    }),
-  )
-  async uploadFiles(
-    @UploadedFiles() files: Array<Express.Multer.File>,
-    @Body() dto: UploadFilesDto,
-  ) {
-    try {
-      // Validate input files
-      if (!files || files.length === 0) {
-        throw new BadRequestException('No files uploaded');
-      }
-
-      // Check if property exists
-      const property = await this.prisma.property.findUnique({
-        where: { propertyId: dto.propertyId },
-      });
-
-      if (!property) {
-        throw new BadRequestException(`Property with ID ${dto.propertyId} does not exist`);
-      }
-
-      const numericPropertyId = property.id;
-
-      // Process files in parallel with Promise.all
-      const uploadPromises = files.map(async (file, index) => {
-        try {
-          const { originalname, mimetype } = file;
-          this.logger.log(`Uploading file ${index + 1}/${files.length}: ${originalname}`);
-
-          const cid = await this.pinataService.uploadFile(file);
-
-          const fileMetadata: UploadedFileMetadata = {
-            name: originalname,
-            documentType: mimetype,
-            cid,
-          };
-
-          return fileMetadata;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
-          this.logger.error(`Failed to upload file ${file.originalname}: ${message}`);
-          throw new InternalServerErrorException(`Failed to upload file ${file.originalname}`);
-        }
-      });
-
-      // Wait for all file uploads to complete
-      const uploadedFiles = await Promise.all(uploadPromises);
-
-      // Create and upload metadata
-      const metadata = {
-        propertyId: dto.propertyId,
-        documents: uploadedFiles,
-        timestamp: new Date().toISOString(),
-      };
-
-      const metadataCID = await this.pinataService.uploadMetadata(metadata);
-
-      // Persist all document rows and property update in a single transaction
-      await this.prisma.$transaction([
-        ...uploadedFiles.map((f) =>
-          this.prisma.propertyDocument.create({
-            data: {
-              name: f.name,
-              documentType: f.documentType,
-              documentsCID: f.cid,
-              propertyId: numericPropertyId,
-            },
-          }),
-        ),
-        this.prisma.property.update({
-          where: { id: numericPropertyId },
-          data: { documentsCID: metadataCID },
-        }),
-      ]);
-
-      return {
-        success: true,
-        metadataCID,
-        documents: uploadedFiles,
-        message: 'Metadata uploaded successfully to IPFS',
-      };
-    } catch (error) {
-      this.logger.error('Upload failed:', error);
-
-      if (error instanceof BadRequestException) {
-        throw error;
-      }
-      throw new InternalServerErrorException('Failed to upload files');
-    }
-  }
-
-  @Post('pinata-s3')
-  @UseGuards(JwtAuthGuard)
   async uploadS3Files(@Body() dto: UploadS3FilesDto) {
     try {
       // Validate input files
@@ -131,7 +31,7 @@ export class PinataController {
         throw new BadRequestException('No file URLs provided');
       }
 
-      // URL count limit - same as FilesInterceptor file count limit
+      // URL count limit
       const maxUrlCount = 20;
       if (dto.fileUrls.length > maxUrlCount) {
         throw new BadRequestException(
@@ -161,9 +61,16 @@ export class PinataController {
         );
       }
 
-      // Check if property exists
+      // Check if property exists and get property owner information
       const property = await this.prisma.property.findUnique({
         where: { propertyId: dto.propertyId },
+        include: {
+          createdBy: {
+            select: {
+              fullName: true,
+            },
+          },
+        },
       });
 
       if (!property) {
@@ -171,16 +78,18 @@ export class PinataController {
       }
 
       const numericPropertyId = property.id;
+      const propertyOwnerName = property.createdBy?.fullName || 'Unknown Owner';
+      const propertyType = property.type ? String(property.type) : '';
+      const propertyName = property.name ? String(property.name) : '';
 
       // Process unique S3 URLs in parallel with Promise.all
-      const uploadPromises = uniqueUrls.map(async (s3Url, index) => {
+      const uploadPromises = uniqueUrls.map(async (s3Url, index): Promise<UploadedFileMetadata> => {
         try {
           this.logger.log(`Processing S3 URL ${index + 1}/${uniqueUrls.length}: ${s3Url}`);
 
-          const fileMetadata = await this.pinataService.uploadFileFromS3Url(s3Url);
-
-          return fileMetadata;
-        } catch (error) {
+          const result = await this.pinataService.uploadFileFromS3Url(s3Url);
+          return result;
+        } catch (error: unknown) {
           const message = error instanceof Error ? error.message : 'Unknown error';
           this.logger.error(`Failed to upload file from S3 URL ${s3Url}: ${message}`);
           throw new InternalServerErrorException(`Failed to upload file from S3 URL: ${s3Url}`);
@@ -188,11 +97,14 @@ export class PinataController {
       });
 
       // Wait for all file uploads to complete
-      const uploadedFiles = await Promise.all(uploadPromises);
+      const uploadedFiles: UploadedFileMetadata[] = await Promise.all(uploadPromises);
 
-      // Create and upload metadata
+      // Create and upload metadata with property owner information
       const metadata = {
         propertyId: dto.propertyId,
+        propertyOwnerName,
+        propertyType,
+        propertyName,
         documents: uploadedFiles,
         timestamp: new Date().toISOString(),
       };
@@ -220,6 +132,9 @@ export class PinataController {
       return {
         success: true,
         metadataCID,
+        propertyOwnerName,
+        propertyName,
+        propertyType,
         documents: uploadedFiles,
         message: `S3 files uploaded successfully to IPFS. Processed ${uniqueUrls.length} unique files (${dto.fileUrls.length - uniqueUrls.length} duplicates removed)`,
       };
