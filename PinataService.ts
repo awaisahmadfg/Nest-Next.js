@@ -1,17 +1,18 @@
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, InternalServerErrorException, BadRequestException } from '@nestjs/common';
 import PinataClient from '@pinata/sdk';
 import pinataSDK from '@pinata/sdk';
 import { Readable } from 'stream';
 import { PropertyDocumentsMetadata, UploadedFileMetadata } from './types/pinata.types';
 import { Logger } from '@nestjs/common';
 import axios from 'axios';
+import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class PinataService {
   private readonly logger = new Logger(PinataService.name);
   private pinata: PinataClient;
 
-  constructor() {
+  constructor(private readonly prisma: PrismaService) {
     // Validate environment variables
     if (!process.env.PINATA_API_KEY || !process.env.PINATA_SECRET_API_KEY) {
       throw new Error('Pinata API keys are not configured');
@@ -156,6 +157,141 @@ export class PinataService {
 
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
       throw new InternalServerErrorException(`Failed to upload file from S3 URL: ${errorMessage}`);
+    }
+  }
+
+  /**
+   * Upload multiple S3 files to Pinata/IPFS with validation
+   * This method contains the logic from PinataController.uploadS3Files
+   */
+  async uploadS3Files(dto: { propertyId: string; fileUrls: string[] }): Promise<{
+    success: boolean;
+    message: string;
+    metadataCID?: string;
+    uploadedFiles?: Array<{ fileName: string; cid: string; size: number }>;
+  }> {
+    try {
+      // Validate input files
+      if (!dto.fileUrls || dto.fileUrls.length === 0) {
+        throw new BadRequestException('No file URLs provided');
+      }
+
+      // URL count limit
+      const maxUrlCount = 20;
+      if (dto.fileUrls.length > maxUrlCount) {
+        throw new BadRequestException(
+          `Too many URLs provided. Maximum ${maxUrlCount} URLs allowed, received ${dto.fileUrls.length}`,
+        );
+      }
+
+      // Remove duplicate URLs to prevent processing the same file multiple times
+      const uniqueUrls = [...new Set(dto.fileUrls)];
+      if (uniqueUrls.length !== dto.fileUrls.length) {
+        const duplicateCount = dto.fileUrls.length - uniqueUrls.length;
+        this.logger.warn(`Removed ${duplicateCount} duplicate URLs from request`);
+      }
+
+      // Validate file types from URLs before processing
+      const allowedExtensions = ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'json', 'txt', 'csv'];
+      const invalidFiles = uniqueUrls.filter((url) => {
+        const urlParts = url.split('/');
+        const fileName = urlParts[urlParts.length - 1].split('?')[0]; // Remove query params
+        const fileExtension = fileName.split('.').pop()?.toLowerCase();
+        return !fileExtension || !allowedExtensions.includes(fileExtension);
+      });
+
+      if (invalidFiles.length > 0) {
+        throw new BadRequestException(
+          `Invalid file types detected. Only PDF, DOC, DOCX, JPG, PNG, JSON, TXT, CSV are allowed for property documents. Invalid files: ${invalidFiles.join(', ')}`,
+        );
+      }
+
+      // Check if property exists and get property owner information
+      const property = await this.prisma.property.findUnique({
+        where: { propertyId: dto.propertyId },
+        include: {
+          createdBy: {
+            select: {
+              fullName: true,
+            },
+          },
+        },
+      });
+
+      if (!property) {
+        throw new BadRequestException(`Property with ID ${dto.propertyId} does not exist`);
+      }
+
+      const numericPropertyId = property.id;
+      const propertyOwnerName = property.createdBy?.fullName || 'Unknown Owner';
+      const propertyType = property.type ? String(property.type) : '';
+      const propertyName = property.name ? String(property.name) : '';
+
+      // Process unique S3 URLs in parallel with Promise.all
+      const uploadPromises = uniqueUrls.map(async (s3Url, index): Promise<UploadedFileMetadata> => {
+        try {
+          this.logger.log(`Processing S3 URL ${index + 1}/${uniqueUrls.length}: ${s3Url}`);
+          const result = await this.uploadFileFromS3Url(s3Url);
+          return result;
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          this.logger.error(`Failed to upload file from S3 URL ${s3Url}: ${message}`);
+          throw new InternalServerErrorException(`Failed to upload file from S3 URL: ${s3Url}`);
+        }
+      });
+
+      // Wait for all file uploads to complete
+      const uploadedFiles: UploadedFileMetadata[] = await Promise.all(uploadPromises);
+
+      // Create and upload metadata with property owner information
+      const metadata = {
+        propertyId: dto.propertyId,
+        propertyOwnerName,
+        propertyType,
+        propertyName,
+        documents: uploadedFiles,
+        timestamp: new Date().toISOString(),
+      };
+
+      const metadataCID = await this.uploadMetadata(metadata);
+
+      // Persist all document rows and property update in a single transaction
+      await this.prisma.$transaction(async (tx) => {
+        // Create PropertyDocument records for each uploaded file
+        const documentPromises = uploadedFiles.map((file) =>
+          tx.propertyDocument.create({
+            data: {
+              propertyId: numericPropertyId,
+              name: file.name,
+              documentType: file.documentType,
+              documentsCID: file.cid,
+            },
+          }),
+        );
+
+        await Promise.all(documentPromises);
+
+        // Update property with metadata CID
+        await tx.property.update({
+          where: { id: numericPropertyId },
+          data: { documentsCID: metadataCID },
+        });
+      });
+
+      return {
+        success: true,
+        message: `Successfully uploaded ${uploadedFiles.length} files to Pinata/IPFS`,
+        metadataCID,
+        uploadedFiles: uploadedFiles.map((file) => ({
+          fileName: file.name,
+          cid: file.cid,
+          size: 0, // Size not available in UploadedFileMetadata
+        })),
+      };
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      this.logger.error('Pinata upload failed:', errorMessage);
+      throw new InternalServerErrorException(`Pinata upload failed: ${errorMessage}`);
     }
   }
 }
