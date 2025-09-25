@@ -64,13 +64,20 @@ model UserRole {
     type         PropertiesType
     name         String
     address      String
+    secondaryType String?
+    market       String?
+    subMarket    String?
     area         Decimal @default(0)
+    city         String?
+    state        String?
+    zipCode      String?
+    country      String?
     grossArea    Decimal @default(0)
     yearBuilt    Int     @default(1900)
     assetType     PropertyAssetType?
     createdAt    DateTime      @default(now())
     updatedAt    DateTime      @updatedAt
-    documentsCID  String?      @db.VarChar(255)  // CID for the uploaded documents
+    documentsCID  String?      @db.VarChar(255)
     // Relations
     createdById  Int  // User ID of the creator
     createdBy    User          @relation(fields: [createdById], references: [id]) // All properties created by that user
@@ -80,6 +87,31 @@ model UserRole {
     documents    PropertyDocument[]
     @@map("Properties")
   }
+
+model PropertyOtherInfo {
+  id                      Int       @id @default(autoincrement())
+  smartTagId              Int
+  dealStructure           DealStructure
+  landSize                Decimal
+  grossBuildingArea       Decimal
+  use                     Use
+  parcelId_or_apn         Int
+  safety                  DateTime
+  leaseStatus             LeaseStatus
+  legalPropertyAddress    String
+  lastSaleDate            DateTime
+  lastSale_or_rentPrice   String
+  blockChain_and_tokenization  BlockchainAndTokenization
+  propertyDescription     String
+  imageLinks              String
+  attachmentLinks         String
+}
+
+model PropertyUtilities {
+  id                      Int       @id @default(autoincrement())
+  utility                 Utilities
+  description             String
+}
 
 model PropertyAssetType {
   id                      Int       @id @default(autoincrement())
@@ -120,7 +152,7 @@ model PropertyAssetType {
     property    Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
     documentsCID  String
     name        String
-    documentType        String   @db.VarChar(100) // MIME or logical type
+    documentType        String   @db.VarChar(100)
     createdAt   DateTime @default(now())
     updatedAt   DateTime @updatedAt
 
@@ -393,7 +425,7 @@ model PropertyUser {
   userId     Int
   property   Property  @relation(fields: [propertyId], references: [id])
   userRole   UserRole  @relation(fields: [userRoleId], references: [id])
-   user       User      @relation(fields: [userId], references: [id])
+  user       User      @relation(fields: [userId], references: [id])
   @@unique([propertyId, userRoleId])
   @@map("Property_Users")
 }
@@ -481,4 +513,39 @@ enum VerificationStatus {
     COMMERCIAL
     INDUSTRIAL
     MIXED_USE
+  }
+  enum BuildingClass {
+    A
+    B
+    C
+  }
+  enum OccupancyType {
+    Single_Tenant
+    Multi_Tenant
+    Vacant
+    Land
+  }
+  enum Use {
+    Current
+    Historical
+  }
+  enum Utilities {
+    Power
+    Internet
+    Electricity
+    Phone
+  }
+  enum LeaseStatus {
+    Active
+    Vacant
+    Under_Construction
+  }
+  enum DealStructure {
+    For_Lease
+    For_Sale
+    Hybrid_Tokenizable
+  }
+  enum BlockchainAndTokenization {
+    TEXT_1
+    TEXT_2
   }
