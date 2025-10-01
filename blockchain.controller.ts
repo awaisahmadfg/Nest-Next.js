@@ -1,26 +1,11 @@
-import {
-  Controller,
-  Post,
-  Get,
-  Body,
-  Param,
-  UseGuards,
-  HttpStatus,
-  HttpCode,
-  ValidationPipe,
-  Logger,
-  ParseIntPipe,
-} from '@nestjs/common';
+import { Controller, Post, Body, UseGuards, Logger, Get, Query } from '@nestjs/common';
 import { BlockchainService } from './blockchain.service';
 import { RegisterLandDto } from './dto/register-land.dto';
 import { UpdatePropertyDto } from './dto/update-property.dto';
-import {
-  RegisterLandResponse,
-  UpdatePropertyResponse,
-  PropertyResponse,
-  CIDCheckResponse,
-} from './dto/blockchain-response.dto';
+import { BlockchainResponseDto } from './dto/blockchain-response.dto';
 import { JwtAuthGuard } from '../auth/guard/jwt-auth.guard';
+import { GetPropertyDto } from './dto/get-proeperty.dto';
+import { OwnershipHistoryResponse } from './dto/ownership-history.dto';
 
 @Controller('api/blockchain')
 @UseGuards(JwtAuthGuard)
@@ -31,83 +16,147 @@ export class BlockchainController {
 
   /**
    * Register a new property on the blockchain
-   * @param registerLandDto - Property registration data
-   * @returns Blockchain transaction response with token ID
+   * @param registerLandDto Property registration data
+   * @returns Blockchain transaction result
    */
   @Post('register-land')
-  @HttpCode(HttpStatus.CREATED)
-  async registerLand(
-    @Body(ValidationPipe) registerLandDto: RegisterLandDto,
-  ): Promise<RegisterLandResponse> {
-    this.logger.log(`Registering land for wallet: ${registerLandDto.landOwnerWallet}`);
+  async registerLand(@Body() registerLandDto: RegisterLandDto): Promise<BlockchainResponseDto> {
+    try {
+      this.logger.log(`Registering land with CID: ${registerLandDto.cid}`);
 
-    const result = await this.blockchainService.registerLand(
-      registerLandDto.cid,
-      registerLandDto.landOwnerWallet,
-    );
+      const result = await this.blockchainService.registerLand(registerLandDto.cid);
 
-    return {
-      ...result,
-      tokenId: result.tokenId,
-    };
+      return {
+        success: true,
+        message: 'Property registered successfully on blockchain',
+        transactionHash: result.hash,
+        tokenId: result.tokenId,
+        cid: registerLandDto.cid,
+      };
+    } catch (error) {
+      this.logger.error('Failed to register land:', error);
+
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to register property on blockchain';
+
+      return {
+        success: false,
+        message: errorMessage,
+        cid: registerLandDto.cid,
+      };
+    }
   }
 
   /**
    * Update property metadata on the blockchain
-   * @param updatePropertyDto - Property update data
-   * @returns Blockchain transaction response
+   * @param updatePropertyDto Property update data
+   * @returns Blockchain transaction result
    */
   @Post('update-property')
-  @HttpCode(HttpStatus.OK)
   async updateProperty(
-    @Body(ValidationPipe) updatePropertyDto: UpdatePropertyDto,
-  ): Promise<UpdatePropertyResponse> {
-    this.logger.log(`Updating property: ${updatePropertyDto.tokenId}`);
+    @Body() updatePropertyDto: UpdatePropertyDto,
+  ): Promise<BlockchainResponseDto> {
+    try {
+      this.logger.log(
+        `Updating property ${updatePropertyDto.tokenId} with new CID: ${updatePropertyDto.newCid}`,
+      );
 
-    const result = await this.blockchainService.updateProperty(
-      updatePropertyDto.tokenId,
-      updatePropertyDto.newCid,
-    );
+      const result = await this.blockchainService.updateProperty(
+        updatePropertyDto.tokenId,
+        updatePropertyDto.newCid,
+      );
 
-    return {
-      ...result,
-      tokenId: updatePropertyDto.tokenId,
-      newCid: updatePropertyDto.newCid,
-    };
+      return {
+        success: true,
+        message: 'Property updated successfully on blockchain',
+        transactionHash: result.hash,
+        tokenId: updatePropertyDto.tokenId,
+        cid: updatePropertyDto.newCid,
+      };
+    } catch (error) {
+      this.logger.error(`Failed to update property ${updatePropertyDto.tokenId}:`, error);
+
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to update property on blockchain';
+
+      return {
+        success: false,
+        message: errorMessage,
+        tokenId: updatePropertyDto.tokenId,
+        cid: updatePropertyDto.newCid,
+      };
+    }
   }
 
   /**
    * Get property information from the blockchain
-   * @param tokenId - Property token ID
+   * @param getPropertyDto Property query data
    * @returns Property information
    */
-  @Get('property/:tokenId')
-  async getProperty(@Param('tokenId', ParseIntPipe) tokenId: number): Promise<PropertyResponse> {
-    this.logger.log(`Getting property information for token ID: ${tokenId}`);
+  @Get('get-property')
+  async getProperty(@Body() getPropertyDto: GetPropertyDto): Promise<BlockchainResponseDto> {
+    try {
+      this.logger.log(`Getting property information for token ID: ${getPropertyDto.tokenId}`);
 
-    const property = await this.blockchainService.getProperty(tokenId);
+      const property = await this.blockchainService.getProperty(getPropertyDto.tokenId);
 
-    return {
-      success: true,
-      data: property,
-    };
+      return {
+        success: true,
+        message: 'Property information retrieved successfully',
+        tokenId: property.tokenId,
+        cid: property.cid,
+        landOwner: property.landOwner,
+      };
+    } catch (error) {
+      this.logger.error(`Failed to get property ${getPropertyDto.tokenId}:`, error);
+
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to get property information';
+
+      return {
+        success: false,
+        message: errorMessage,
+        tokenId: getPropertyDto.tokenId,
+      };
+    }
   }
 
   /**
-   * Check if a CID is already used
-   * @param cid - IPFS Content Identifier
-   * @returns Boolean indicating if CID is used
+   * Get property ownership history using Moralis API
+   * @param propertyId Property ID to get ownership history for
+   * @returns Property ownership history
    */
-  @Get('cid-used/:cid')
-  async isCIDUsed(@Param('cid') cid: string): Promise<CIDCheckResponse> {
-    this.logger.log(`Checking if CID is used: ${cid}`);
+  @Get('ownership-history')
+  async getPropertyOwnershipHistory(
+    @Query('propertyId') propertyId: string,
+  ): Promise<OwnershipHistoryResponse> {
+    try {
+      this.logger.log(`Getting ownership history for property: ${propertyId}`);
 
-    const isUsed = await this.blockchainService.isCIDUsed(cid);
+      if (!propertyId) {
+        return {
+          success: false,
+          message: 'Property ID is required',
+        };
+      }
 
-    return {
-      success: true,
-      isUsed,
-      cid,
-    };
+      const ownershipHistory = await this.blockchainService.getPropertyOwnershipHistory(propertyId);
+
+      return {
+        success: true,
+        message: 'Property ownership history retrieved successfully',
+        data: ownershipHistory,
+      };
+    } catch (error) {
+      this.logger.error(`Failed to get ownership history for property ${propertyId}:`, error);
+
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to get property ownership history';
+
+      return {
+        success: false,
+        message: errorMessage,
+      };
+    }
   }
 }
