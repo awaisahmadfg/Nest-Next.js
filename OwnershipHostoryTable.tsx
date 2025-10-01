@@ -12,19 +12,14 @@ import {
   TableRow,
   Typography,
   CircularProgress,
-  Alert,
   Chip,
   Tooltip,
   TextField,
   Button,
   Stack,
 } from '@mui/material';
-import {
-  ContentCopy as CopyIcon,
-  OpenInNew as ExternalLinkIcon,
-  Search as SearchIcon,
-} from '@mui/icons-material';
-import { auditLogsService, PropertyOwnershipHistoryData } from '@/services/auditLogsService';
+import { Search as SearchIcon } from '@mui/icons-material';
+import { ownershipHistoryService, PropertyOwnershipHistoryData } from '@/services/ownershipHistory';
 import { useAppStore } from '@/store/appStore';
 
 interface OwnershipHistoryTableProps {
@@ -44,10 +39,22 @@ export default function OwnershipHistoryTable({ propertyId }: OwnershipHistoryTa
       return;
     }
 
+    // Validate that property ID is not negative
+    const numericId = parseFloat(id);
+    if (numericId < 0) {
+      setError('Property ID must be a positive number');
+      addNotification({
+        type: 'error',
+        title: 'Invalid Input',
+        message: 'Property ID must be a positive number',
+      });
+      return;
+    }
+
     try {
       setLoading(true);
       setError(null);
-      const response = await auditLogsService.getPropertyOwnershipHistory(id);
+      const response = await ownershipHistoryService.getPropertyOwnershipHistory(id);
 
       if (response.success && response.data) {
         console.log('Ownership history data received:', response.data);
@@ -58,9 +65,15 @@ export default function OwnershipHistoryTable({ propertyId }: OwnershipHistoryTa
           message: `Property ownership history loaded successfully (${response.data.ownershipHistory.length} records)`,
         });
       } else {
-        console.error('Failed to load ownership history:', response);
-        setError(response.message || 'Failed to load property ownership history');
+        // Handle error response from backend - NO CONSOLE ERROR, ADD TOAST
+        const errorMessage = response.message || 'Failed to load property ownership history';
+        setError(errorMessage);
         setHistoryData(null);
+        addNotification({
+          type: 'error',
+          title: 'Error',
+          message: errorMessage,
+        });
       }
     } catch (err) {
       const errorMessage =
@@ -76,7 +89,6 @@ export default function OwnershipHistoryTable({ propertyId }: OwnershipHistoryTa
       setLoading(false);
     }
   };
-
   const handleSearch = () => {
     fetchOwnershipHistory(searchPropertyId);
   };
@@ -175,11 +187,11 @@ export default function OwnershipHistoryTable({ propertyId }: OwnershipHistoryTa
       </Paper>
 
       {/* Error Display */}
-      {error && (
+      {/* {error && (
         <Alert severity="error" sx={{ mb: 3, bgcolor: '#2D1B1B', color: '#FF6B6B' }}>
           {error}
         </Alert>
-      )}
+      )} */}
 
       {/* Ownership History Table */}
       {historyData && (
@@ -210,12 +222,14 @@ export default function OwnershipHistoryTable({ propertyId }: OwnershipHistoryTa
               </TableHead>
               <TableBody>
                 {historyData.ownershipHistory
-                  .sort((a, b) => b.blockNumber - a.blockNumber) // Sort by block number descending (most recent first)
+                  // Sort by block number descending (most recent first)
+                  .sort((a, b) => b.blockNumber - a.blockNumber)
                   .map((record, index) => (
                     <TableRow
                       key={index}
                       sx={{
                         bgcolor: index === 0 ? 'rgba(255, 152, 0, 0.1)' : 'transparent',
+                        // Highlight the first record(current owner) with a different color
                         borderLeft: index === 0 ? '4px solid #FF9800' : 'none',
                       }}
                     >
