@@ -149,6 +149,63 @@ export class BlockchainService {
   }
 
   /**
+   * Get current wallet balance (ETH)
+   */
+  async getWalletBalanceEth(): Promise<string> {
+    try {
+      const balanceWei = await this.provider.getBalance(this.wallet.address);
+      return ethers.formatEther(balanceWei);
+    } catch (error) {
+      this.logger.error('Failed to fetch wallet balance:', error);
+      throw new InternalServerErrorException('Failed to fetch wallet balance');
+    }
+  }
+
+  /**
+   * Estimate total transaction cost for registerLand(cid)
+   * Returns gas, gasPrice and total cost in wei (as bigint) and ETH string
+   */
+  async estimateRegisterLandCost(cid: string): Promise<{
+    gasLimit: bigint;
+    gasPriceWei: bigint;
+    totalCostWei: bigint;
+    totalCostEth: string;
+  }> {
+    try {
+      const gasLimit = await this.contract.registerLand.estimateGas(cid);
+      const feeData = await this.provider.getFeeData();
+      const gasPriceWei = feeData.gasPrice ?? feeData.maxFeePerGas ?? 0n;
+      const totalCostWei = gasLimit * gasPriceWei;
+      const totalCostEth = ethers.formatEther(totalCostWei);
+      return { gasLimit, gasPriceWei, totalCostWei, totalCostEth };
+    } catch (error) {
+      this.logger.error('Failed to estimate registerLand gas:', error);
+
+      // Proper type checking for ethers.js errors
+      const ethersError = error as {
+        code?: string;
+        shortMessage?: string;
+        message?: string;
+      };
+
+      // Check if this is an insufficient balance error
+      if (
+        ethersError.code === 'CALL_EXCEPTION' &&
+        (ethersError.shortMessage?.includes('execution reverted') ||
+          ethersError.message?.includes('execution reverted'))
+      ) {
+        const walletAddress = this.wallet.address;
+        const balanceEth = await this.getWalletBalanceEth();
+        throw new BadRequestException(
+          `Insufficient balance in wallet ${walletAddress}. Current balance: ${balanceEth} ETH. Please add funds to complete the transaction.`,
+        );
+      }
+
+      throw new InternalServerErrorException('Failed to estimate transaction gas');
+    }
+  }
+
+  /**
    * Update property metadata on the blockchain
    * @param tokenId Token ID of the property to update
    * @param newCid New IPFS Content Identifier
