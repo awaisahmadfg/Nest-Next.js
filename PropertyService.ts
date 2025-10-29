@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return */
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access */
 import {
   BadRequestException,
   Injectable,
@@ -20,13 +20,14 @@ import type { Attachment, AuthedReq } from 'src/common/types';
 import { S3Service } from '../file-upload/s3.service';
 import { BulkCreatePropertyDto } from './dto/bulk-create-property.dto';
 import { generatePropertyId } from 'src/common/helpers';
-import { PinataService } from '../pinata/pinata.service';
 import { BlockchainService } from '../blockchain/blockchain.service';
-import { ethers } from 'ethers';
-import { BlockchainQueueService } from '../queue/blockchain-queue.service';
+import { GetPropertiesQueryDto } from './dto/get-properties.dto';
+import { LambdaService } from '../lambda/lambda.service';
+import { EmailService } from '../email/email.service';
+import { SqsService } from '../sqs/sqs.service';
 
 function isValidUtility(utility: string): utility is Utilities {
-  return ['Power', 'Internet', 'Electricity', 'Phone'].includes(utility);
+  return ['Power', 'Water', 'Gas', 'Internet', 'Parking', 'Safety'].includes(utility);
 }
 
 @Injectable()
@@ -37,9 +38,10 @@ export class PropertyService {
     private readonly prisma: PrismaService,
     private readonly invitationsService: InvitationsService,
     private readonly s3Service: S3Service,
-    private readonly pinataService: PinataService,
     private readonly blockchainService: BlockchainService,
-    private readonly blockchainQueueService: BlockchainQueueService,
+    private readonly lambdaService: LambdaService,
+    private readonly emailService: EmailService,
+    private readonly sqsService: SqsService,
   ) {}
 
   async createPropertyAndInvite(
@@ -76,29 +78,12 @@ export class PropertyService {
       zipCode ?? '02139',
     );
 
-    // Early blockchain balance check - BEFORE any operations (S3 upload, property creation, etc.)
+    // Early blockchain balance validation for only Property creation, will remove this code when we will go to APPROVE functionality
     if (documents && documents.length > 0) {
       try {
-        // Check if we have sufficient balance for blockchain transaction
-        // We'll use a dummy CID for estimation since we need to check balance early
-        const dummyCID = 'QmSpVG2mvzwRyRBk8sMHYTNmNf7rQzxTtgcWY6oC8Kj9WB'; // Use a known valid CID for estimation
+        const dummyCID = 'QmSpVG2mvzwRyRBk8sMHYTNmNf7rQzxTtgcWY6oC8Kj9WB';
         this.logger.log(`Performing early balance check before any operations for ${propertyId}`);
-
-        const [balanceEth, estimate] = await Promise.all([
-          this.blockchainService.getWalletBalanceEth(),
-          this.blockchainService.estimateRegisterLandCost(dummyCID),
-        ]);
-
-        const balanceWei = ethers.parseEther(balanceEth);
-        if (balanceWei < estimate.totalCostWei) {
-          this.logger.warn(
-            `Insufficient wallet balance detected early. Balance: ${balanceEth} ETH, Required ~${estimate.totalCostEth} ETH. Aborting all operations for ${propertyId}`,
-          );
-          throw new BadRequestException(
-            `Insufficient balance in wallet ${this.blockchainService['wallet'].address}. Current balance: ${balanceEth} ETH. Please add funds to complete the transaction.`,
-          );
-        }
-
+        await this.blockchainService.ensureSufficientBalanceForRegisterLand(dummyCID);
         this.logger.log(
           `Balance check passed. Proceeding with S3 upload and property creation for ${propertyId}`,
         );
@@ -193,104 +178,52 @@ export class PropertyService {
       });
     }
 
-    // Upload attachments to Pinata/IPFS if any exist
-    let metadataCID: string | null = null;
-    if (attachmentsData && attachmentsData.length > 0) {
-      try {
-        this.logger.log(
-          `Starting Pinata upload for property ${property.propertyId} with ${attachmentsData.length} files`,
-        );
-
-        const fileUrls = attachmentsData.map((attachment) => attachment.filePath);
-
-        // Use the existing uploadS3Files method from PinataService
-        const result = await this.pinataService.uploadS3Files({
-          propertyId: property.propertyId,
-          fileUrls: fileUrls,
-        });
-
-        metadataCID = result.metadataCID || null;
-        this.logger.log(
-          `Pinata upload completed for property ${property.propertyId}: ${result.message}`,
-        );
-      } catch (error: unknown) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-        this.logger.error(
-          `Failed to upload files to Pinata for property ${property.propertyId}: ${errorMessage}`,
-        );
-        // Don't throw the error - property creation should still succeed even if Pinata upload fails
-      }
-    }
-
-    // Queue blockchain registration job
+    // Enqueue blockchain job (Pinata + Blockchain via Lambda) when files exist
     let blockchainNote = '';
-    if (metadataCID) {
+    if (attachmentsData && attachmentsData.length > 0) {
+      const fileUrls = attachmentsData.map((attachment) => attachment.filePath);
       this.logger.log(
-        `Queuing blockchain registration for property ${property.propertyId} with CID: ${metadataCID}`,
+        `Enqueuing blockchain job for property ${property.propertyId} with ${fileUrls.length} files`,
       );
 
-      try {
-        // Preflight: estimate gas cost and ensure wallet balance is sufficient
-        const [balanceEth, estimate] = await Promise.all([
-          this.blockchainService.getWalletBalanceEth(),
-          this.blockchainService.estimateRegisterLandCost(metadataCID),
-        ]);
+      const userDetails = await this.prisma.user.findUnique({
+        where: { id: currentUser.id },
+        select: { email: true, fullName: true },
+      });
 
-        const balanceWei = ethers.parseEther(balanceEth);
-        if (balanceWei < estimate.totalCostWei) {
-          this.logger.warn(
-            `Insufficient wallet balance. Balance: ${balanceEth} ETH, Required ~${estimate.totalCostEth} ETH. Skipping blockchain queue for ${property.propertyId}`,
-          );
-          // Append a note for frontend visibility without failing the flow
-          blockchainNote = ' (blockchain registration pending: insufficient gas balance)';
-        } else {
-          const userDetails = await this.prisma.user.findUnique({
-            where: { id: currentUser.id },
-            select: { email: true, fullName: true },
-          });
-
-          if (userDetails?.email) {
-            await this.blockchainQueueService.addBlockchainRegistrationJob({
-              propertyId: property.propertyId,
-              propertyName: property.name,
-              metadataCID,
-              userId: currentUser.id,
-              userEmail: userDetails.email,
-              userFullName: userDetails.fullName,
-            });
-          } else {
-            this.logger.warn(
-              `User ${currentUser.id} email not found, skipping blockchain registration job for property ${property.propertyId}`,
-            );
-          }
-        }
-      } catch (queueError: unknown) {
-        const queueErrorMessage =
-          queueError instanceof Error ? queueError.message : 'Unknown error';
-        this.logger.error(
-          `Failed to queue blockchain registration job for property ${property.propertyId}: ${queueErrorMessage}`,
+      // Enqueue the job
+      // SQS - Message without MessageGroupId( if i use then It Ignores for aws standard queue)
+      if (userDetails?.email) {
+        await this.sqsService.send(this.sqsService.blockchainQueueUrl, {
+          propertyId: property.propertyId,
+          propertyName: property.name,
+          fileUrls,
+          userId: currentUser.id,
+          userEmail: userDetails.email,
+          userFullName: userDetails.fullName,
+        });
+      } else {
+        this.logger.warn(
+          `User ${currentUser.id} email not found, skipping blockchain enqueue for property ${property.propertyId}`,
         );
-
-        // If it's a BadRequestException (insufficient balance), return it to frontend
-        if (queueError instanceof BadRequestException) {
-          throw queueError;
-        }
-
-        // For other errors, append a note but don't fail the flow
-        blockchainNote = blockchainNote || ' (blockchain registration pending: queue error)';
+        blockchainNote = ' (blockchain registration pending: user email not found)';
       }
     }
 
     // Send invites
     if (Array.isArray(invites) && invites.length > 0) {
-      const tasks = invites.map((inv) =>
-        this.invitationsService.sendEmailToInvite({
+      this.logger.log(`✅ Invites found, sending ${invites.length} invitations`);
+      const tasks = invites.map((inv) => {
+        this.logger.log(
+          `Sending invitation to ${inv.email} with roles ${JSON.stringify(inv.roles)}`,
+        );
+        return this.invitationsService.inviteToProperty({
           invitedById: currentUser.id,
           email: inv.email,
           roles: inv.roles,
           propertyId: property.propertyId,
-        }),
-      );
+        });
+      });
       await Promise.allSettled(tasks);
     }
 
@@ -310,58 +243,92 @@ export class PropertyService {
 
   async getProperties(
     user: AuthedReq['user'],
-    options?: {
-      cursor?: string;
-      limit?: number;
-      status?: PropertyStatus[];
-    },
+    query: GetPropertiesQueryDto,
   ): Promise<{
     properties: PropertyResponseDto[];
     hasMore: boolean;
     nextCursor?: string;
   }> {
     const { id: userId, selectedRole } = user;
-    const { cursor, limit = 9, status = [] } = options || {};
+    const {
+      cursor,
+      limit = 9,
+      status = [],
+      types = [],
+      market,
+      subMarket,
+      dateFrom,
+      dateTo,
+    } = query;
 
-    // ✅ Validate cursor
     const validCursor =
       cursor && cursor.trim() && !isNaN(parseInt(cursor, 10)) ? parseInt(cursor, 10) : undefined;
 
-    const propertyInclude = {
-      otherInfo: true,
-      attachments: true,
-      propertyUsers: {
-        select: {
-          userRole: true,
-          userRoleId: true,
-        },
-      },
-      ownerInfo: true, // PropertyOwnerInfo
-    };
-
-    // ✅ Build dynamic where clause
+    // 🧱 Build where clause dynamically
     const whereClause: any = {};
 
     if (status.length > 0) {
       whereClause.status = { in: status };
     }
 
+    if (types.length > 0) {
+      const validTypes = types
+        .map((t) => t.toUpperCase())
+        .filter((t): t is keyof typeof PropertiesType => t in PropertiesType)
+        .map((t) => PropertiesType[t]);
+
+      if (validTypes.length > 0) {
+        whereClause.types = {
+          some: {
+            type: { in: validTypes },
+          },
+        };
+      }
+    }
+
+    if (market) {
+      whereClause.market = { contains: market, mode: 'insensitive' };
+    }
+
+    if (subMarket) {
+      whereClause.subMarket = { contains: subMarket, mode: 'insensitive' };
+    }
+
+    if (dateFrom || dateTo) {
+      whereClause.createdAt = {};
+      if (dateFrom) {
+        whereClause.createdAt.gte = new Date(dateFrom);
+      }
+      if (dateTo) {
+        whereClause.createdAt.lte = new Date(dateTo);
+      }
+    }
+
     if (validCursor) {
       whereClause.id = { lt: validCursor };
     }
 
+    // 🔒 Restrict non-admin users
     if (selectedRole !== Role.SUPER_ADMIN && selectedRole !== Role.ADMIN) {
       whereClause.propertyUsers = {
         some: {
           userId,
-          userRole: {
-            role: { equals: selectedRole },
-          },
+          userRole: { role: { equals: selectedRole } },
         },
       };
     }
 
-    // ✅ Fetch paginated properties
+    // 🔍 Include relations
+    const propertyInclude = {
+      otherInfo: true,
+      attachments: true,
+      propertyUsers: {
+        select: { userRole: true, userRoleId: true },
+      },
+      ownerInfo: true,
+    };
+
+    // 🧾 Query
     const properties = await this.prisma.property.findMany({
       where: whereClause,
       include: propertyInclude,
@@ -369,7 +336,6 @@ export class PropertyService {
       take: limit + 1,
     });
 
-    // ✅ Handle pagination
     const hasMore = properties.length > limit;
     const resultProperties = hasMore ? properties.slice(0, limit) : properties;
 
@@ -378,7 +344,7 @@ export class PropertyService {
         ? resultProperties[resultProperties.length - 1].id.toString()
         : undefined;
 
-    // ✅ Transform numeric fields
+    // 🧮 Transform numeric fields
     const transformedProperties = resultProperties.map((property) => ({
       ...property,
       otherInfo: property.otherInfo
@@ -402,7 +368,7 @@ export class PropertyService {
   }
 
   async getPropertyById(
-    propertyRecordId: string,
+    propertyRecordId: number,
     user: AuthedReq['user'],
   ): Promise<PropertyResponseDto> {
     const { id: userId, selectedRole } = user;
@@ -420,13 +386,21 @@ export class PropertyService {
       propertyUtilities: true, // PropertyUtilities
       attachments: true, // Attachments
       ownerInfo: true, // PropertyOwnerInfo
-      invites: {
+      inviteRoles: {
+        where: {
+          propertyId: propertyRecordId,
+        },
         select: {
           id: true,
-          email: true,
-          roles: true,
+          role: true,
           status: true,
           createdAt: true,
+          acceptedAt: true,
+          userInvite: {
+            select: {
+              email: true,
+            },
+          },
         },
       },
     };
@@ -435,14 +409,14 @@ export class PropertyService {
     if (selectedRole === Role.SUPER_ADMIN || selectedRole === Role.ADMIN) {
       // Super admin can access any property
       property = await this.prisma.property.findUnique({
-        where: { propertyId: propertyRecordId },
+        where: { id: propertyRecordId },
         include: propertyInclude,
       });
     } else {
       // Regular users can only access properties they have access to
       property = await this.prisma.property.findFirst({
         where: {
-          propertyId: propertyRecordId,
+          id: propertyRecordId,
           propertyUsers: {
             some: {
               userId,
@@ -521,7 +495,6 @@ export class PropertyService {
       return await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
         // 2️⃣ Insert properties
         await tx.property.createMany({
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
           data: propertiesWithGeneratedIds.map(
             ({
               // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -915,7 +888,7 @@ export class PropertyService {
     if (invites && invites.length > 0) {
       try {
         const tasks = invites.map((inv) =>
-          this.invitationsService.sendEmailToInvite({
+          this.invitationsService.inviteToProperty({
             invitedById: currentUser.id,
             email: inv.email,
             roles: inv.roles,
@@ -963,5 +936,45 @@ export class PropertyService {
     if (!isCreator && !hasAccess && !isAdmin) {
       throw new ForbiddenException('You do not have permission to update this property');
     }
+  }
+
+  async deleteAttachment(
+    propertyRecordId: number,
+    attachmentId: number,
+    currentUser: AuthedReq['user'],
+  ): Promise<void> {
+    // Check property permission first
+    await this.checkPropertyPermission(propertyRecordId, currentUser);
+
+    // Find the attachment
+    const attachment = await this.prisma.attachment.findFirst({
+      where: {
+        id: attachmentId,
+        propertyId: propertyRecordId,
+      },
+    });
+
+    if (!attachment) {
+      throw new NotFoundException('Attachment not found');
+    }
+
+    try {
+      // Delete from S3 first
+      await this.s3Service.deleteFile(attachment.filePath);
+    } catch (error) {
+      this.logger.warn(`Failed to delete file from S3: ${attachment.filePath}`, error);
+      // Continue with database deletion even if S3 deletion fails
+    }
+
+    // Delete from database
+    await this.prisma.attachment.delete({
+      where: {
+        id: attachmentId,
+      },
+    });
+
+    this.logger.log(
+      `Attachment ${attachmentId} deleted successfully for property ${propertyRecordId}`,
+    );
   }
 }
