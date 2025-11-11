@@ -1,74 +1,56 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   Box,
-  Paper,
+  Typography,
+  Collapse,
+  IconButton,
   Table,
   TableBody,
   TableCell,
   TableContainer,
   TableHead,
   TableRow,
-  Typography,
   CircularProgress,
   Chip,
   Tooltip,
-  TextField,
-  Button,
-  Stack,
 } from '@mui/material';
-import { Search as SearchIcon } from '@mui/icons-material';
+import { ExpandMore as ExpandMoreIcon, ExpandLess as ExpandLessIcon } from '@mui/icons-material';
 import { ownershipHistoryService, PropertyOwnershipHistoryData } from '@/services/ownershipHistory';
 import { useAppStore } from '@/store/appStore';
 
-interface OwnershipHistoryTableProps {
-  propertyId?: string;
+interface OwnershipHistoryProps {
+  propertyId: string;
 }
 
-export default function OwnershipHistoryTable({ propertyId }: OwnershipHistoryTableProps) {
+const OwnershipHistory: React.FC<OwnershipHistoryProps> = ({ propertyId }) => {
+  const [expanded, setExpanded] = useState(false);
   const [historyData, setHistoryData] = useState<PropertyOwnershipHistoryData | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [searchPropertyId, setSearchPropertyId] = useState(propertyId || '');
   const { addNotification } = useAppStore();
 
-  const fetchOwnershipHistory = async (id: string) => {
-    if (!id.trim()) {
-      setError('Please enter a property ID');
-      return;
+  const handleToggle = () => {
+    setExpanded(!expanded);
+    // Fetch data when expanding for the first time
+    if (!expanded && !historyData && !loading && propertyId) {
+      fetchOwnershipHistory();
     }
+  };
 
-    // Validate that property ID is not negative
-    const numericId = parseFloat(id);
-    if (numericId < 0) {
-      setError('Property ID must be a positive number');
-      addNotification({
-        type: 'error',
-        title: 'Invalid Input',
-        message: 'Property ID must be a positive number',
-      });
+  const fetchOwnershipHistory = async () => {
+    if (!propertyId?.trim()) {
       return;
     }
 
     try {
       setLoading(true);
-      setError(null);
-      const response = await ownershipHistoryService.getPropertyOwnershipHistory(id);
+      const response = await ownershipHistoryService.getPropertyOwnershipHistory(propertyId);
 
       if (response.success && response.data) {
-        console.log('Ownership history data received:', response.data);
         setHistoryData(response.data);
-        addNotification({
-          type: 'success',
-          title: 'Success',
-          message: `Property ownership history loaded successfully (${response.data.ownershipHistory.length} records)`,
-        });
       } else {
-        // Handle error response from backend - NO CONSOLE ERROR, ADD TOAST
         const errorMessage = response.message || 'Failed to load property ownership history';
-        setError(errorMessage);
-        setHistoryData(null);
         addNotification({
           type: 'error',
           title: 'Error',
@@ -78,8 +60,6 @@ export default function OwnershipHistoryTable({ propertyId }: OwnershipHistoryTa
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : 'Failed to load property ownership history';
-      setError(errorMessage);
-      setHistoryData(null);
       addNotification({
         type: 'error',
         title: 'Error',
@@ -87,15 +67,6 @@ export default function OwnershipHistoryTable({ propertyId }: OwnershipHistoryTa
       });
     } finally {
       setLoading(false);
-    }
-  };
-  const handleSearch = () => {
-    fetchOwnershipHistory(searchPropertyId);
-  };
-
-  const handleKeyPress = (event: React.KeyboardEvent) => {
-    if (event.key === 'Enter') {
-      handleSearch();
     }
   };
 
@@ -115,7 +86,7 @@ export default function OwnershipHistoryTable({ propertyId }: OwnershipHistoryTa
 
   const formatAddress = (address: string) => {
     if (!address || address === '0x0000000000000000000000000000000000000000') return 'Mint';
-    if (address.length < 10) return address; // For short addresses like "Unknown"
+    if (address.length < 10) return address;
     return `${address.slice(0, 6)}...${address.slice(-4)}`;
   };
 
@@ -123,212 +94,184 @@ export default function OwnershipHistoryTable({ propertyId }: OwnershipHistoryTa
     return new Date(timestamp).toLocaleString();
   };
 
-  useEffect(() => {
-    if (propertyId) {
-      setSearchPropertyId(propertyId);
-      fetchOwnershipHistory(propertyId);
-    }
-  }, [propertyId]);
-
   return (
-    <Box sx={{ width: '100%' }}>
-      {/* Search Section */}
-      <Paper sx={{ p: 3, mb: 3, bgcolor: '#1A1A1A', border: '1px solid #2A2A2A' }}>
-        <Typography variant="h6" sx={{ color: '#FFFFFF', mb: 2 }}>
-          Property Ownership History
-        </Typography>
-
-        <Stack direction="row" spacing={2} alignItems="center">
-          <TextField
-            fullWidth
-            label="Property ID"
-            value={searchPropertyId}
-            onChange={(e) => setSearchPropertyId(e.target.value)}
-            onKeyPress={handleKeyPress}
-            placeholder="Enter property ID to view ownership history"
+    <Box>
+      {/* Header */}
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          mb: 2,
+          cursor: 'pointer',
+        }}
+        onClick={handleToggle}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Typography
+            variant="h6"
             sx={{
-              '& .MuiOutlinedInput-root': {
-                color: '#FFFFFF',
-                '& fieldset': {
-                  borderColor: '#2A2A2A',
-                },
-                '&:hover fieldset': {
-                  borderColor: '#40E0D0',
-                },
-                '&.Mui-focused fieldset': {
-                  borderColor: '#40E0D0',
-                },
-              },
-              '& .MuiInputLabel-root': {
-                color: '#B0B0B0',
-                '&.Mui-focused': {
-                  color: '#40E0D0',
-                },
-              },
-            }}
-          />
-          <Button
-            variant="contained"
-            onClick={handleSearch}
-            disabled={loading}
-            startIcon={loading ? <CircularProgress size={20} /> : <SearchIcon />}
-            sx={{
-              bgcolor: '#40E0D0',
-              color: '#000000',
-              '&:hover': {
-                bgcolor: '#36C5B8',
-              },
-              minWidth: 120,
+              color: '#FFFFFF',
+              fontWeight: 600,
+              fontSize: '18px',
+              pb: 0.5,
             }}
           >
-            {loading ? 'Loading...' : 'Search'}
-          </Button>
-        </Stack>
-      </Paper>
+            Ownership History
+          </Typography>
+        </Box>
+        <IconButton
+          size="small"
+          sx={{
+            color: '#FFFFFF',
+            '&:hover': {
+              bgcolor: 'rgba(255, 255, 255, 0.1)',
+            },
+          }}
+        >
+          {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+        </IconButton>
+      </Box>
 
-      {/* Error Display */}
-      {/* {error && (
-        <Alert severity="error" sx={{ mb: 3, bgcolor: '#2D1B1B', color: '#FF6B6B' }}>
-          {error}
-        </Alert>
-      )} */}
-
-      {/* Ownership History Table */}
-      {historyData && (
-        <Paper sx={{ bgcolor: '#1A1A1A', border: '1px solid #2A2A2A' }}>
-          <Box sx={{ p: 3, borderBottom: '1px solid #2A2A2A' }}>
-            <Typography variant="h6" sx={{ color: '#FFFFFF' }}>
-              Ownership History
-            </Typography>
-            <Typography variant="body2" sx={{ color: '#B0B0B0', mt: 1 }}>
-              Property ID: {historyData.propertyId} | Token ID: {historyData.tokenId}
-            </Typography>
-          </Box>
-
-          <TableContainer>
-            <Table>
-              <TableHead>
-                <TableRow sx={{ bgcolor: '#2A2A2A' }}>
-                  <TableCell sx={{ color: '#FFFFFF', fontWeight: 'bold' }}>Event Type</TableCell>
-                  <TableCell sx={{ color: '#FFFFFF', fontWeight: 'bold' }}>From Address</TableCell>
-                  <TableCell sx={{ color: '#FFFFFF', fontWeight: 'bold' }}>To Address</TableCell>
-                  <TableCell sx={{ color: '#FFFFFF', fontWeight: 'bold' }}>
-                    Transaction Hash
-                  </TableCell>
-                  <TableCell sx={{ color: '#FFFFFF', fontWeight: 'bold' }}>Block Number</TableCell>
-                  <TableCell sx={{ color: '#FFFFFF', fontWeight: 'bold' }}>Timestamp</TableCell>
-                  <TableCell sx={{ color: '#FFFFFF', fontWeight: 'bold' }}>Status</TableCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
-                {historyData.ownershipHistory
-                  // Sort by block number descending (most recent first)
-                  .sort((a, b) => b.blockNumber - a.blockNumber)
-                  .map((record, index) => (
-                    <TableRow
-                      key={index}
-                      sx={{
-                        bgcolor: index === 0 ? 'rgba(255, 152, 0, 0.1)' : 'transparent',
-                        // Highlight the first record(current owner) with a different color
-                        borderLeft: index === 0 ? '4px solid #FF9800' : 'none',
-                      }}
-                    >
-                      <TableCell>
-                        <Chip
-                          label={record.eventType}
-                          size="small"
-                          sx={{
-                            bgcolor: record.eventType === 'MINT' ? '#4CAF50' : '#2196F3',
-                            color: '#FFFFFF',
-                            fontWeight: 'bold',
-                          }}
-                        />
-                      </TableCell>
-                      <TableCell sx={{ color: '#FFFFFF', fontFamily: 'monospace' }}>
-                        <Tooltip title={record.fromAddress}>
-                          <Box
-                            component="span"
-                            onClick={() => copyToClipboard(record.fromAddress, 'From Address')}
-                            sx={{ cursor: 'pointer', '&:hover': { color: '#40E0D0' } }}
-                          >
-                            {formatAddress(record.fromAddress)}
-                          </Box>
-                        </Tooltip>
-                      </TableCell>
-                      <TableCell sx={{ color: '#FFFFFF', fontFamily: 'monospace' }}>
-                        <Tooltip title={record.toAddress}>
-                          <Box
-                            component="span"
-                            onClick={() => copyToClipboard(record.toAddress, 'To Address')}
-                            sx={{ cursor: 'pointer', '&:hover': { color: '#40E0D0' } }}
-                          >
-                            {formatAddress(record.toAddress)}
-                          </Box>
-                        </Tooltip>
-                      </TableCell>
-                      <TableCell sx={{ color: '#FFFFFF', fontFamily: 'monospace' }}>
-                        {record.transactionHash && record.transactionHash.length > 10 ? (
-                          <Tooltip title={record.transactionHash}>
+      {/* Collapsible Content */}
+      <Collapse in={expanded}>
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          {loading ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', p: 4 }}>
+              <CircularProgress size={40} sx={{ color: '#40E0D0' }} />
+            </Box>
+          ) : historyData && historyData.ownershipHistory.length > 0 ? (
+            <TableContainer>
+              <Table>
+                <TableHead>
+                  <TableRow sx={{ bgcolor: '#272727' }}>
+                    <TableCell sx={{ color: '#FFFFFF', fontWeight: 'bold' }}>Event Type</TableCell>
+                    <TableCell sx={{ color: '#FFFFFF', fontWeight: 'bold' }}>
+                      From Address
+                    </TableCell>
+                    <TableCell sx={{ color: '#FFFFFF', fontWeight: 'bold' }}>To Address</TableCell>
+                    <TableCell sx={{ color: '#FFFFFF', fontWeight: 'bold' }}>
+                      Transaction Hash
+                    </TableCell>
+                    <TableCell sx={{ color: '#FFFFFF', fontWeight: 'bold' }}>
+                      Block Number
+                    </TableCell>
+                    <TableCell sx={{ color: '#FFFFFF', fontWeight: 'bold' }}>Timestamp</TableCell>
+                    <TableCell sx={{ color: '#FFFFFF', fontWeight: 'bold' }}>Status</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {historyData.ownershipHistory
+                    .sort((a, b) => b.blockNumber - a.blockNumber)
+                    .map((record, index) => (
+                      <TableRow
+                        key={index}
+                        sx={{
+                          bgcolor: index === 0 ? '#121314' : 'transparent',
+                        }}
+                      >
+                        <TableCell>
+                          <Chip
+                            label={record.eventType}
+                            size="small"
+                            sx={{
+                              bgcolor: record.eventType === 'MINT' ? 'green' : 'orange',
+                              color: '#FFFFFF',
+                              fontWeight: 'bold',
+                              py: '18px',
+                              px: '12px',
+                              borderRadius: '16px',
+                            }}
+                          />
+                        </TableCell>
+                        <TableCell sx={{ color: '#FFFFFF', fontFamily: 'monospace' }}>
+                          <Tooltip title={record.fromAddress}>
                             <Box
                               component="span"
-                              onClick={() => openInExplorer(record.transactionHash)}
-                              sx={{ cursor: 'pointer', '&:hover': { color: '#40E0D0' } }}
+                              onClick={() => copyToClipboard(record.fromAddress, 'From Address')}
+                              sx={{ cursor: 'pointer', '&:hover': { color: '#18ABE2' } }}
                             >
-                              {formatAddress(record.transactionHash)}
+                              {formatAddress(record.fromAddress)}
                             </Box>
                           </Tooltip>
-                        ) : (
-                          <span>{record.transactionHash || 'N/A'}</span>
-                        )}
-                      </TableCell>
-                      <TableCell sx={{ color: '#FFFFFF' }}>
-                        {record.blockNumber.toLocaleString()}
-                      </TableCell>
-                      <TableCell sx={{ color: '#FFFFFF' }}>
-                        {formatTimestamp(record.timestamp)}
-                      </TableCell>
-                      <TableCell>
-                        {index === 0 ? (
-                          <Chip
-                            label="Current Owner"
-                            size="small"
-                            sx={{
-                              bgcolor: '#FF9800',
-                              color: '#FFFFFF',
-                              fontWeight: 'bold',
-                            }}
-                          />
-                        ) : (
-                          <Chip
-                            label="Previous"
-                            size="small"
-                            sx={{
-                              bgcolor: '#757575',
-                              color: '#FFFFFF',
-                              fontWeight: 'bold',
-                            }}
-                          />
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-              </TableBody>
-            </Table>
-          </TableContainer>
-        </Paper>
-      )}
-
-      {/* No Data State */}
-      {!historyData && !loading && !error && (
-        <Paper sx={{ p: 4, textAlign: 'center', bgcolor: '#1A1A1A', border: '1px solid #2A2A2A' }}>
-          <Typography variant="h6" sx={{ color: '#B0B0B0', mb: 2 }}>
-            No Ownership History
-          </Typography>
-          <Typography variant="body2" sx={{ color: '#808080' }}>
-            Enter a property ID above to view ownership history
-          </Typography>
-        </Paper>
-      )}
+                        </TableCell>
+                        <TableCell sx={{ color: '#FFFFFF', fontFamily: 'monospace' }}>
+                          <Tooltip title={record.toAddress}>
+                            <Box
+                              component="span"
+                              onClick={() => copyToClipboard(record.toAddress, 'To Address')}
+                              sx={{ cursor: 'pointer', '&:hover': { color: '#18ABE2' } }}
+                            >
+                              {formatAddress(record.toAddress)}
+                            </Box>
+                          </Tooltip>
+                        </TableCell>
+                        <TableCell sx={{ color: '#FFFFFF', fontFamily: 'monospace' }}>
+                          {record.transactionHash && record.transactionHash.length > 10 ? (
+                            <Tooltip title={record.transactionHash}>
+                              <Box
+                                component="span"
+                                onClick={() => openInExplorer(record.transactionHash)}
+                                sx={{ cursor: 'pointer', '&:hover': { color: '#18ABE2' } }}
+                              >
+                                {formatAddress(record.transactionHash)}
+                              </Box>
+                            </Tooltip>
+                          ) : (
+                            <span>{record.transactionHash || 'N/A'}</span>
+                          )}
+                        </TableCell>
+                        <TableCell sx={{ color: '#FFFFFF' }}>
+                          {record.blockNumber.toLocaleString()}
+                        </TableCell>
+                        <TableCell sx={{ color: '#FFFFFF' }}>
+                          {formatTimestamp(record.timestamp)}
+                        </TableCell>
+                        <TableCell>
+                          {index === 0 ? (
+                            <Chip
+                              label="Current Owner"
+                              size="small"
+                              sx={{
+                                bgcolor: '#FF9800',
+                                color: '#FFFFFF',
+                                fontWeight: 'bold',
+                                py: '18px',
+                                px: '12px',
+                                borderRadius: '16px',
+                              }}
+                            />
+                          ) : (
+                            <Chip
+                              label="Previous"
+                              size="small"
+                              sx={{
+                                bgcolor: '#757575',
+                                color: '#FFFFFF',
+                                fontWeight: 'bold',
+                                py: '18px',
+                                px: '12px',
+                                borderRadius: '16px',
+                              }}
+                            />
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          ) : (
+            <Box sx={{ p: 4, textAlign: 'center' }}>
+              <Typography variant="body2" sx={{ color: '#B0B0B0' }}>
+                No ownership history available
+              </Typography>
+            </Box>
+          )}
+        </Box>
+      </Collapse>
     </Box>
   );
-}
+};
+
+export default OwnershipHistory;
