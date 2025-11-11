@@ -7,6 +7,7 @@ import {
   ExpandLess as ExpandLessIcon,
   OpenInNew as OpenInNewIcon,
 } from '@mui/icons-material';
+import { BLOCKCHAIN } from '@/lib/constants';
 
 interface BlockchainDetailsProps {
   contractAddress?: string;
@@ -20,7 +21,7 @@ const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
   contractAddress = '0xec8155c8D9B453f1c6BDe731E91468116185Cb1f',
   tokenId,
   tokenStandard = 'ERC721',
-  chain = 'Sepolia',
+  chain = BLOCKCHAIN.CHAIN_NAME,
   metadataCid,
 }) => {
   const [expanded, setExpanded] = useState(false);
@@ -36,7 +37,8 @@ const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
 
   const handleTokenIdClick = () => {
     if (metadataCid && tokenId) {
-      const ipfsUrl = `https://ipfs.io/ipfs/${metadataCid}/${tokenId}`;
+      const base = process.env.NEXT_PUBLIC_IPFS_GATEWAY || 'https://ipfs.io/ipfs';
+      const ipfsUrl = `${base}/${metadataCid}`;
       window.open(ipfsUrl, '_blank', 'noopener,noreferrer');
     }
   };
@@ -46,57 +48,26 @@ const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
   };
 
   return (
-    <Box
-      sx={{
-        bgcolor: '#1A1A1A',
-        border: '1px solid #333333',
-        borderRadius: '8px',
-        overflow: 'hidden',
-        mb: 3,
-      }}
-    >
+    <Box>
       {/* Header */}
       <Box
         sx={{
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          p: 2,
+          mb: 2,
           cursor: 'pointer',
-          '&:hover': {
-            bgcolor: '#222222',
-          },
         }}
         onClick={handleToggle}
       >
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <Box
-            sx={{
-              width: 20,
-              height: 20,
-              bgcolor: '#40E0D0',
-              borderRadius: '4px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-          >
-            <Typography
-              variant="caption"
-              sx={{
-                color: '#000000',
-                fontWeight: 'bold',
-                fontSize: '10px',
-              }}
-            >
-              BC
-            </Typography>
-          </Box>
           <Typography
             variant="h6"
             sx={{
               color: '#FFFFFF',
-              fontWeight: '600',
+              fontWeight: 600,
+              fontSize: '18px',
+              pb: 0.5,
             }}
           >
             Blockchain details
@@ -117,22 +88,23 @@ const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
 
       {/* Collapsible Content */}
       <Collapse in={expanded}>
-        <Box sx={{ p: 2, pt: 0 }}>
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           {/* Contract Address */}
           <Box
             sx={{
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'center',
-              py: 1.5,
-              borderBottom: '1px solid #333333',
+              p: 2,
+              bgcolor: '#1C1C1C',
             }}
           >
             <Typography
               variant="body2"
               sx={{
-                color: '#B0B0B0',
-                fontWeight: '500',
+                color: '#D1D1D1',
+                fontWeight: 400,
+                fontSize: '16px',
               }}
             >
               Contract Address
@@ -141,7 +113,8 @@ const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
               <Typography
                 variant="body2"
                 sx={{
-                  color: '#40E0D0',
+                  color: '#528BFF',
+                  fontWeight: 600,
                   fontFamily: 'monospace',
                   cursor: 'pointer',
                   '&:hover': {
@@ -154,8 +127,9 @@ const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
               </Typography>
               <OpenInNewIcon
                 sx={{
-                  color: '#40E0D0',
+                  color: '#528BFF',
                   fontSize: '16px',
+                  fontWeight: 600,
                   cursor: 'pointer',
                 }}
                 onClick={handleContractAddressClick}
@@ -169,15 +143,15 @@ const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'center',
-              py: 1.5,
-              borderBottom: '1px solid #333333',
+              p: 2,
             }}
           >
             <Typography
               variant="body2"
               sx={{
-                color: '#B0B0B0',
-                fontWeight: '500',
+                color: '#D1D1D1',
+                fontWeight: 400,
+                fontSize: '16px',
               }}
             >
               Token ID
@@ -188,7 +162,8 @@ const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
                   <Typography
                     variant="body2"
                     sx={{
-                      color: '#40E0D0',
+                      color: '#528BFF',
+                      fontWeight: 600,
                       fontFamily: 'monospace',
                       cursor: 'pointer',
                       '&:hover': {
@@ -201,7 +176,8 @@ const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
                   </Typography>
                   <OpenInNewIcon
                     sx={{
-                      color: '#40E0D0',
+                      color: '#528BFF',
+                      fontWeight: 600,
                       fontSize: '16px',
                       cursor: 'pointer',
                     }}
@@ -228,15 +204,16 @@ const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'center',
-              py: 1.5,
-              borderBottom: '1px solid #333333',
+              p: 2,
+              bgcolor: '#1C1C1C',
             }}
           >
             <Typography
               variant="body2"
               sx={{
-                color: '#B0B0B0',
-                fontWeight: '500',
+                color: '#D1D1D1',
+                fontWeight: 400,
+                fontSize: '16px',
               }}
             >
               Token Standard
@@ -259,14 +236,15 @@ const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
               display: 'flex',
               justifyContent: 'space-between',
               alignItems: 'center',
-              py: 1.5,
+              p: 2,
             }}
           >
             <Typography
               variant="body2"
               sx={{
-                color: '#B0B0B0',
-                fontWeight: '500',
+                color: '#D1D1D1',
+                fontWeight: 400,
+                fontSize: '16px',
               }}
             >
               Chain
