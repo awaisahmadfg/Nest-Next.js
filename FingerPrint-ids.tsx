@@ -1,39 +1,3 @@
-'use client';
-
-import { useAuth } from '@/hooks/useAuth';
-import { Box, Container, Paper, Typography, CircularProgress, Divider, Stack } from '@mui/material';
-
-function FingerprintIdsContent() {
-  const { user, isLoading } = useAuth();
-
-  if (isLoading) {
-    return (
-      <Box
-        sx={{
-          minHeight: '100vh',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          bgcolor: '#0A0A0A',
-        }}
-      >
-        <CircularProgress size={80} thickness={2} sx={{ color: '#40E0D0' }} />
-      </Box>
-    );
-  }
-
-  return (
-    <Box sx={{ minHeight: '100vh', bgcolor: '#0A0A0A' }}>
-      <Container maxWidth="lg" sx={{ py: 4 }}>
-        <Paper
-          sx={{
-            p: 4,
-            bgcolor: 'transparent',
-            border: '4px dashed #2A2A2A',
-            borderRadius: 2,
-            minHeight: 384,
-          }}
-        >
           <Box sx={{ textAlign: 'center' }}>
             <Typography
               variant="h4"
