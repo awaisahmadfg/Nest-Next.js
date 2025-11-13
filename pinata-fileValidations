@@ -1,0 +1,26 @@
+/**
+ * Pinata-supported image file types
+ * Pinata supports: jpg, jpeg, png for images
+ */
+
+export const PINATA_IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png'] as const;
+
+export const PINATA_IMAGE_MIME_TYPES = ['image/jpeg', 'image/jpg', 'image/png'] as const;
+
+/**
+ * Check if a file is an image type (Pinata-supported image formats)
+ */
+export function isPinataImageFile(file: File): boolean {
+  if (file.type && (PINATA_IMAGE_MIME_TYPES as readonly string[]).includes(file.type)) {
+    return true;
+  }
+
+  // Check by file extension
+  const fileName = file.name.toLowerCase();
+  const extension = fileName.split('.').pop();
+  if (extension && (PINATA_IMAGE_EXTENSIONS as readonly string[]).includes(extension)) {
+    return true;
+  }
+
+  return false;
+}
