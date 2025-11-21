@@ -15,16 +15,28 @@ import { UpdateFoundationalDataDto } from './dto/update-foundational-data.dto';
 import { UpdateOtherInfoDto } from './dto/update-other-info.dto';
 import { UpdateUtilitiesAttachmentsDto } from './dto/update-utilities-attachments.dto';
 import { UpdateInvitationsDto } from './dto/update-invitations.dto';
+import { UpdateOverviewDto } from './dto/update-overview.dto';
 import { InvitationsService } from '../invitations/invitations.service';
 import type { Attachment, AuthedReq } from 'src/common/types';
 import { S3Service } from '../file-upload/s3.service';
 import { BulkCreatePropertyDto } from './dto/bulk-create-property.dto';
 import { generatePropertyId } from 'src/common/helpers';
-import { BlockchainService } from '../blockchain/blockchain.service';
 import { GetPropertiesQueryDto } from './dto/get-properties.dto';
+import {
+  PaginatedInvitedUsersResponseDto,
+  PropertyInvitedUsersResponse,
+} from './dto/property-invited-users-response.dto';
+import { ActivityLogService } from '../activity-log/activity-log.service';
+import { ActivityActions, ActivityEntityTypes } from '../activity-log/types';
+import {
+  PaginatedPropertyUsersResponseDto,
+  PropertyUserResponseDto,
+} from './dto/property-users-response.dto';
 import { LambdaService } from '../lambda/lambda.service';
 import { EmailService } from '../email/email.service';
-import { SqsService } from '../sqs/sqs.service';
+import { EmailType } from '../email/types/email.types';
+import { BLOCKCHAIN } from 'src/common/constants';
+import { BlockchainService } from '../blockchain/blockchain.service';
 
 function isValidUtility(utility: string): utility is Utilities {
   return ['Power', 'Water', 'Gas', 'Internet', 'Parking', 'Safety'].includes(utility);
@@ -38,10 +50,10 @@ export class PropertyService {
     private readonly prisma: PrismaService,
     private readonly invitationsService: InvitationsService,
     private readonly s3Service: S3Service,
-    private readonly blockchainService: BlockchainService,
+    private readonly activityService: ActivityLogService,
     private readonly lambdaService: LambdaService,
     private readonly emailService: EmailService,
-    private readonly sqsService: SqsService,
+    private readonly blockchainService: BlockchainService,
   ) {}
 
   async createPropertyAndInvite(
@@ -78,31 +90,9 @@ export class PropertyService {
       zipCode ?? '02139',
     );
 
-    // Early blockchain balance validation for only Property creation, will remove this code when we will go to APPROVE functionality
-    if (documents && documents.length > 0) {
-      try {
-        const dummyCID = 'QmSpVG2mvzwRyRBk8sMHYTNmNf7rQzxTtgcWY6oC8Kj9WB';
-        this.logger.log(`Performing early balance check before any operations for ${propertyId}`);
-        await this.blockchainService.ensureSufficientBalanceForRegisterLand(dummyCID);
-        this.logger.log(
-          `Balance check passed. Proceeding with S3 upload and property creation for ${propertyId}`,
-        );
-      } catch (balanceError: unknown) {
-        // If it's a BadRequestException (insufficient balance), throw it
-        if (balanceError instanceof BadRequestException) {
-          throw balanceError;
-        }
-
-        // For other errors, log but continue (might be network issues)
-        const errorMessage = balanceError instanceof Error ? balanceError.message : 'Unknown error';
-        this.logger.warn(
-          `Early balance check failed for ${propertyId}: ${errorMessage}. Continuing with property creation.`,
-        );
-      }
-    }
-
     // Upload documents
     let attachmentsData: Attachment[] = [];
+
     if (documents && documents.length > 0) {
       attachmentsData = await Promise.all(
         documents.map(async (file: Express.Multer.File): Promise<Attachment> => {
@@ -146,6 +136,8 @@ export class PropertyService {
             landSize,
             grossBuildingArea,
             dealStructure,
+            imageIds: [],
+            attachmentIds: [],
           },
         },
         ownerInfo: {
@@ -160,53 +152,18 @@ export class PropertyService {
       include: { types: true, attachments: true, ownerInfo: true },
     });
 
-    // Add current user to PropertyUser if not SUPER_ADMIN
-    if (currentUser && currentUser.selectedRole !== Role.SUPER_ADMIN) {
-      const userRole = await this.prisma.userRole.findFirst({
-        where: {
-          userId: currentUser.id,
-          role: currentUser.selectedRole,
-        },
-      });
+    // After property is created, update PropertyOtherInfo with attachment IDs
+    if (attachmentsData.length > 0 && property.attachments) {
+      const createdAttachments = property.attachments;
+      const attachmentIds: number[] = createdAttachments.map((attachment) => attachment.id);
 
-      await this.prisma.propertyUser.create({
-        data: {
-          propertyId: property.id,
-          userId: currentUser.id,
-          userRoleId: userRole?.id as number,
-        },
-      });
-    }
-
-    // Enqueue blockchain job (Pinata + Blockchain via Lambda) when files exist
-    let blockchainNote = '';
-    if (attachmentsData && attachmentsData.length > 0) {
-      const fileUrls = attachmentsData.map((attachment) => attachment.filePath);
-      this.logger.log(
-        `Enqueuing blockchain job for property ${property.propertyId} with ${fileUrls.length} files`,
-      );
-
-      const userDetails = await this.prisma.user.findUnique({
-        where: { id: currentUser.id },
-        select: { email: true, fullName: true },
-      });
-
-      // Enqueue the job
-      // SQS - Message without MessageGroupId( if i use then It Ignores for aws standard queue)
-      if (userDetails?.email) {
-        await this.sqsService.send(this.sqsService.blockchainQueueUrl, {
-          propertyId: property.propertyId,
-          propertyName: property.name,
-          fileUrls,
-          userId: currentUser.id,
-          userEmail: userDetails.email,
-          userFullName: userDetails.fullName,
+      if (attachmentIds.length > 0) {
+        await this.prisma.propertyOtherInfo.update({
+          where: { propertyRecordId: property.id },
+          data: {
+            attachmentIds: attachmentIds,
+          },
         });
-      } else {
-        this.logger.warn(
-          `User ${currentUser.id} email not found, skipping blockchain enqueue for property ${property.propertyId}`,
-        );
-        blockchainNote = ' (blockchain registration pending: user email not found)';
       }
     }
 
@@ -227,17 +184,231 @@ export class PropertyService {
       await Promise.allSettled(tasks);
     }
 
+    await this.activityService.logActivity({
+      action: ActivityActions.PROPERTY_CREATED,
+      entityId: property.id,
+      entityType: ActivityEntityTypes.PROPERTY,
+      description: 'Create Property',
+      metadata: {
+        propertyId: property.id,
+        name: property.name,
+        market: property.market,
+        createdBy: currentUser.id,
+        createdAt: property.createdAt,
+        location: property.address ?? null,
+        attachments: attachmentsData.map((attachment) => ({
+          link: attachment.filePath,
+          name: attachment.fileName,
+        })),
+        totalInvited: invites?.length,
+        invitedUsers: invites?.map((inv) => ({
+          email: inv.email,
+          roles: inv.roles,
+        })),
+      },
+    });
+
     let message = 'Property created successfully';
     if (invites && invites.length > 0) {
       message += ' and invitations sent';
-    }
-    if (blockchainNote) {
-      message += blockchainNote;
     }
 
     return {
       property: plainToInstance(PropertyResponseDto, property, { excludeExtraneousValues: true }),
       message,
+    };
+  }
+
+  async publishProperty(
+    propertyRecordId: number,
+    currentUser: AuthedReq['user'],
+  ): Promise<{ message: string }> {
+    const property = await this.prisma.property.findUnique({
+      where: { id: propertyRecordId },
+      include: {
+        attachments: true,
+        types: {
+          select: {
+            type: true,
+          },
+        },
+        otherInfo: {
+          select: {
+            attachmentIds: true,
+          },
+        },
+      },
+    });
+
+    if (!property) {
+      throw new NotFoundException('Property not found');
+    }
+
+    // Include ALL attachments that are in attachmentIds (all files in attachmentIds go to metadata)
+    // This includes both documents and any images that are in attachmentIds
+    const attachmentIds = property.otherInfo?.attachmentIds || [];
+    const attachmentsForMetadata = property.attachments.filter((attachment) =>
+      attachmentIds.includes(attachment.id),
+    );
+
+    if (!attachmentsForMetadata || attachmentsForMetadata.length === 0) {
+      throw new BadRequestException(
+        'Property must have at least one attachment in attachmentIds to publish',
+      );
+    }
+
+    // Get user details for email
+    const userDetails = await this.prisma.user.findUnique({
+      where: { id: currentUser.id },
+      select: { email: true, fullName: true },
+    });
+
+    if (!userDetails?.email) {
+      throw new BadRequestException('User email not found');
+    }
+
+    // Prevent duplicate publishing: Check if property already has tokenId and is APPROVED
+    if (property.tokenId && property.status === PropertyStatus.APPROVED) {
+      this.logger.warn(
+        `Property ${property.propertyId} already has tokenId ${property.tokenId} and is APPROVED. Skipping duplicate publish.`,
+      );
+      throw new BadRequestException(
+        `Property already published to blockchain with tokenId ${property.tokenId}. Cannot publish again.`,
+      );
+    }
+
+    // Determine action: register (no tokenId) or update (has tokenId)
+    const action = property.tokenId ? 'update' : 'register';
+    // Include all attachments from attachmentIds in fileUrls
+    const fileUrls = attachmentsForMetadata.map((attachment) => attachment.filePath);
+
+    // Get property types as comma-separated string
+    const propertyType =
+      property.types && property.types.length > 0
+        ? property.types.map((t) => t.type).join(', ')
+        : property.secondaryType
+          ? String(property.secondaryType)
+          : '';
+
+    this.logger.log(
+      `Processing blockchain ${action} job for property ${property.propertyId} with ${fileUrls.length} attachments from attachmentIds`,
+    );
+
+    if (!propertyType) {
+      this.logger.warn(
+        `Property ${property.propertyId} has no property types set. Metadata will have empty propertyType.`,
+      );
+    }
+
+    try {
+      const balanceEth = await this.blockchainService.getWalletBalanceEth();
+      const balanceWei = parseFloat(balanceEth);
+
+      if (balanceWei === 0) {
+        this.logger.warn(`Wallet balance is zero: ${balanceEth} POL`);
+        const errorMessage = `Insufficient balance in wallet. Current balance: ${balanceEth} POL. Please add funds to complete the transaction.`;
+
+        const propertyRecord = await this.prisma.property.findUnique({
+          where: { propertyId: property.propertyId },
+          select: { id: true },
+        });
+
+        if (propertyRecord) {
+          await this.activityService.logActivity({
+            action: ActivityActions.PROPERTY_PUBLISH_BALANCE_ERROR,
+            entityType: ActivityEntityTypes.PROPERTY,
+            entityId: propertyRecord.id,
+            description: errorMessage,
+            metadata: {
+              propertyId: property.propertyId,
+              action: action,
+              balance: balanceEth,
+              errorType: 'zero_balance',
+            },
+          });
+        }
+
+        throw new BadRequestException(errorMessage);
+      }
+
+      // Only estimate gas for register action (not for update in publish)
+      if (action === 'register' && !property.tokenId) {
+        const dummyCID = 'QmYjtig7VJQ6XsnUjqqJvj7QaMcCAwtrgNdahSiFofrE7o';
+        this.logger.log(`Estimating gas cost for register with dummy CID: ${dummyCID}`);
+
+        const estimate = await this.blockchainService.estimateRegisterLandCost(dummyCID);
+        const estimatedCostWei = estimate.totalCostWei;
+        this.logger.log(
+          `Estimated gas cost for register: ${estimate.totalCostEth} POL (${estimatedCostWei.toString()} wei)`,
+        );
+
+        // Compare balance with estimated cost
+        const balanceWeiBigInt = BigInt(Math.floor(balanceWei * 1e18)); // Convert POL to wei
+        if (balanceWeiBigInt < estimatedCostWei) {
+          const estimatedCostEth = (Number(estimatedCostWei) / 1e18).toFixed(6);
+          this.logger.warn(
+            `Insufficient balance: ${balanceEth} POL < estimated cost: ${estimatedCostEth} POL`,
+          );
+          const errorMessage = `Insufficient balance in wallet. Current balance: ${balanceEth} POL. Estimated transaction cost: ${estimatedCostEth} POL. Please add funds to complete the transaction.`;
+
+          const propertyRecord = await this.prisma.property.findUnique({
+            where: { propertyId: property.propertyId },
+            select: { id: true },
+          });
+
+          if (propertyRecord) {
+            await this.activityService.logActivity({
+              action: ActivityActions.PROPERTY_PUBLISH_BALANCE_ERROR,
+              entityType: ActivityEntityTypes.PROPERTY,
+              entityId: propertyRecord.id,
+              description: errorMessage,
+              metadata: {
+                propertyId: property.propertyId,
+                action: action,
+                balance: balanceEth,
+                estimatedCost: estimatedCostEth,
+                errorType: 'insufficient_balance',
+              },
+            });
+          }
+
+          throw new BadRequestException(errorMessage);
+        }
+      }
+
+      this.logger.log(
+        `Wallet balance check passed: ${balanceEth} POL (sufficient for transaction)`,
+      );
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Failed to check wallet balance: ${errorMessage}`);
+      throw new BadRequestException(
+        `Failed to verify wallet balance. Please try again later. Error: ${errorMessage}`,
+      );
+    }
+
+    this.processBlockchainJob({
+      action,
+      propertyId: property.propertyId,
+      propertyName: property.name,
+      propertyType,
+      fileUrls,
+      userId: currentUser.id,
+      userEmail: userDetails.email,
+      userFullName: userDetails.fullName,
+      tokenId: property.tokenId || undefined,
+    }).catch((error) => {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Background blockchain ${action} job failed for property ${property.propertyId}: ${errorMessage}`,
+      );
+    });
+
+    return {
+      message: `Property ${action === 'register' ? 'registration' : 'update'} job started successfully`,
     };
   }
 
@@ -596,6 +767,8 @@ export class PropertyService {
       propertyName,
       address,
       secondaryType,
+      isResidential,
+      isCommercial,
       isIndustrial,
       isMultiFamily,
       isRetail,
@@ -620,6 +793,8 @@ export class PropertyService {
 
     // Validate at least one property type is selected
     const hasPropertyType =
+      isResidential ||
+      isCommercial ||
       isIndustrial ||
       isMultiFamily ||
       isRetail ||
@@ -676,6 +851,8 @@ export class PropertyService {
 
     // Create new property types based on selected checkboxes
     const propertyTypes: PropertiesType[] = [];
+    if (isResidential) propertyTypes.push(PropertiesType.RESIDENTIAL);
+    if (isCommercial) propertyTypes.push(PropertiesType.COMMERCIAL);
     if (isIndustrial) propertyTypes.push(PropertiesType.INDUSTRIAL);
     if (isMultiFamily) propertyTypes.push(PropertiesType.MULTI_FAMILY);
     if (isRetail) propertyTypes.push(PropertiesType.RETAIL);
@@ -716,9 +893,17 @@ export class PropertyService {
         lastSale_or_rentPrice: '',
         blockChain_and_tokenization: 'TEXT_1', // Default value
         propertyDescription: '',
-        imageLinks: '',
-        attachmentLinks: '',
+        imageIds: [],
+        attachmentIds: [],
       },
+    });
+
+    await this.activityService.logActivity({
+      action: ActivityActions.PROPERTY_UPDATED,
+      entityId: propertyRecordId,
+      entityType: ActivityEntityTypes.PROPERTY,
+      description: 'Added the basic info',
+      metadata: updateData,
     });
   }
 
@@ -789,12 +974,64 @@ export class PropertyService {
         }),
       );
 
-      // Create attachments
-      await this.prisma.attachment.createMany({
-        data: attachmentsData.map((attachment) => ({
-          ...attachment,
-          propertyId: propertyRecordId,
-        })),
+      // Create attachments and get their IDs
+      const createdAttachments = await Promise.all(
+        attachmentsData.map((attachment) =>
+          this.prisma.attachment.create({
+            data: {
+              ...attachment,
+              propertyId: propertyRecordId,
+            },
+          }),
+        ),
+      );
+
+      const imageIds: number[] = [];
+
+      createdAttachments.forEach((attachment) => {
+        if (attachment.fileType.startsWith('image/')) {
+          imageIds.push(attachment.id);
+        }
+        // Only images are handled in updateOtherInfo - documents go through separate "Attach Documents" flow
+      });
+
+      const existingOtherInfo = await this.prisma.propertyOtherInfo.findUnique({
+        where: { propertyRecordId },
+      });
+
+      if (existingOtherInfo) {
+        const existingImageIds = existingOtherInfo.imageIds || [];
+
+        await this.prisma.propertyOtherInfo.update({
+          where: { propertyRecordId },
+          data: {
+            imageIds: imageIds.length > 0 ? [...existingImageIds, ...imageIds] : existingImageIds,
+          },
+        });
+      } else {
+        await this.prisma.propertyOtherInfo.create({
+          data: {
+            propertyRecordId,
+            imageIds: imageIds.length > 0 ? imageIds : [],
+            attachmentIds: [],
+          },
+        });
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { documents: _, ...activityMetadata } = updateData;
+      await this.activityService.logActivity({
+        action: ActivityActions.PROPERTY_UPDATED,
+        entityId: propertyRecordId,
+        entityType: ActivityEntityTypes.PROPERTY,
+        description: 'Added the other info',
+        metadata: {
+          ...activityMetadata,
+          attachment: attachmentsData.map((attachment) => ({
+            link: attachment.filePath,
+            name: attachment.fileName,
+          })),
+        },
       });
     }
   }
@@ -836,10 +1073,10 @@ export class PropertyService {
         data: { utilities: null },
       });
     }
-
+    let attachmentsData: Attachment[] = [];
     // Handle document uploads
     if (documents && documents.length > 0) {
-      const attachmentsData = await Promise.all(
+      attachmentsData = await Promise.all(
         documents.map(async (file: Express.Multer.File): Promise<Attachment> => {
           const s3Url: string = await this.s3Service.uploadFile(file, 'property');
           return {
@@ -851,14 +1088,60 @@ export class PropertyService {
         }),
       );
 
-      // Create attachments
-      await this.prisma.attachment.createMany({
-        data: attachmentsData.map((attachment) => ({
-          ...attachment,
-          propertyId: propertyRecordId,
-        })),
+      // Create attachments and get their IDs
+      const createdAttachments = await Promise.all(
+        attachmentsData.map((attachment) =>
+          this.prisma.attachment.create({
+            data: {
+              ...attachment,
+              propertyId: propertyRecordId,
+            },
+          }),
+        ),
+      );
+
+      const attachmentIds: number[] = createdAttachments.map((attachment) => attachment.id);
+
+      const existingOtherInfo = await this.prisma.propertyOtherInfo.findUnique({
+        where: { propertyRecordId },
       });
+
+      if (existingOtherInfo) {
+        const existingImageIds = existingOtherInfo.imageIds || [];
+        const existingAttachmentIds = existingOtherInfo.attachmentIds || [];
+
+        await this.prisma.propertyOtherInfo.update({
+          where: { propertyRecordId },
+          data: {
+            imageIds: existingImageIds,
+            attachmentIds: [...existingAttachmentIds, ...attachmentIds],
+          },
+        });
+      } else {
+        await this.prisma.propertyOtherInfo.create({
+          data: {
+            propertyRecordId,
+            utilities: utilities && utilities.length > 0 ? JSON.stringify(utilities) : null,
+            imageIds: [],
+            attachmentIds: attachmentIds,
+          },
+        });
+      }
     }
+
+    await this.activityService.logActivity({
+      action: ActivityActions.PROPERTY_UPDATED,
+      entityId: propertyRecordId,
+      entityType: ActivityEntityTypes.PROPERTY,
+      description: 'Added utilities and attachments',
+      metadata: {
+        utilities: utilities,
+        attachments: attachmentsData.map((attachment) => ({
+          link: attachment.filePath,
+          name: attachment.fileName,
+        })),
+      },
+    });
   }
 
   async updateInvitations(
@@ -906,6 +1189,14 @@ export class PropertyService {
     await this.prisma.property.update({
       where: { id: propertyId },
       data: { status: PropertyStatus.WAITING_UPDATE_APPROVAL },
+    });
+
+    await this.activityService.logActivity({
+      action: ActivityActions.PROPERTY_UPDATED,
+      entityId: propertyId,
+      entityType: ActivityEntityTypes.PROPERTY,
+      description: 'Update the invitations',
+      metadata: updateData,
     });
   }
 
@@ -973,8 +1264,764 @@ export class PropertyService {
       },
     });
 
+    const propertyOtherInfo = await this.prisma.propertyOtherInfo.findUnique({
+      where: { propertyRecordId },
+    });
+
+    if (propertyOtherInfo) {
+      const isImage = attachment.fileType.startsWith('image/');
+      const updateData: { attachmentIds?: number[]; imageIds?: number[] } = {};
+
+      if (Array.isArray(propertyOtherInfo.attachmentIds)) {
+        const attachmentIds: number[] = propertyOtherInfo.attachmentIds;
+        const updatedAttachmentIds = attachmentIds.filter((id) => id !== attachmentId);
+        updateData.attachmentIds = updatedAttachmentIds;
+      }
+
+      if (isImage && Array.isArray(propertyOtherInfo.imageIds)) {
+        const imageIds: number[] = propertyOtherInfo.imageIds;
+        const updatedImageIds = imageIds.filter((id) => id !== attachmentId);
+        updateData.imageIds = updatedImageIds;
+      }
+
+      if (Object.keys(updateData).length > 0) {
+        await this.prisma.propertyOtherInfo.update({
+          where: { propertyRecordId },
+          data: updateData,
+        });
+      }
+    }
+
+    await this.activityService.logActivity({
+      action: ActivityActions.PROPERTY_REMOVE_ATTACHMENT,
+      entityId: propertyRecordId ?? undefined,
+      entityType: ActivityEntityTypes.PROPERTY,
+      description: `Remove document form property.`,
+      metadata: {
+        name: attachment.fileName,
+        propertyId: propertyRecordId,
+        url: attachment.filePath,
+        id: attachment.id,
+      },
+    });
+
     this.logger.log(
       `Attachment ${attachmentId} deleted successfully for property ${propertyRecordId}`,
     );
+  }
+
+  async updateOverview(
+    propertyId: number,
+    updateData: UpdateOverviewDto,
+    currentUser: AuthedReq['user'],
+  ): Promise<void> {
+    await this.checkPropertyPermission(propertyId, currentUser);
+
+    const {
+      propertyName,
+      address,
+      secondaryType,
+      isResidential,
+      isCommercial,
+      isIndustrial,
+      isMultiFamily,
+      isRetail,
+      isOffice,
+      isLandAndDevelopment,
+      isGsa,
+      isSpecialUse,
+      isHospitality,
+      buildingClass,
+      occupancyType,
+      market,
+      subMarket,
+      city,
+      state,
+      zipCode,
+      country,
+      smartTagId,
+      landSqFt,
+      use,
+      yearBuilt,
+      leaseStatus,
+      lastSaleDate,
+      dealStructure,
+      grossBuildingArea,
+      parcelId,
+      safetyInspection,
+      legalPropertyAddress,
+      blockchainTokenization,
+      lastSaleRentPrice,
+      propertyDescription,
+    } = updateData;
+
+    // Start a transaction to update both foundational data and other info
+    await this.prisma.$transaction(async (tx) => {
+      // Update foundational data
+      await tx.property.update({
+        where: { id: propertyId },
+        data: {
+          name: propertyName,
+          address,
+          secondaryType,
+          buildingClass,
+          occupancyType,
+          market,
+          subMarket,
+          city,
+          state,
+          zipCode,
+          country,
+          yearBuilt,
+        },
+      });
+
+      // Update property types
+      await tx.propertyTypeOnProperty.deleteMany({
+        where: { propertyId },
+      });
+
+      const propertyTypes: Array<{ propertyId: number; type: PropertiesType }> = [];
+      if (isResidential) propertyTypes.push({ propertyId, type: PropertiesType.RESIDENTIAL });
+      if (isCommercial) propertyTypes.push({ propertyId, type: PropertiesType.COMMERCIAL });
+      if (isIndustrial) propertyTypes.push({ propertyId, type: PropertiesType.INDUSTRIAL });
+      if (isMultiFamily) propertyTypes.push({ propertyId, type: PropertiesType.MULTI_FAMILY });
+      if (isRetail) propertyTypes.push({ propertyId, type: PropertiesType.RETAIL });
+      if (isOffice) propertyTypes.push({ propertyId, type: PropertiesType.OFFICE });
+      if (isLandAndDevelopment)
+        propertyTypes.push({ propertyId, type: PropertiesType.LAND_AND_DEVELOPMENT });
+      if (isGsa) propertyTypes.push({ propertyId, type: PropertiesType.GSA });
+      if (isSpecialUse) propertyTypes.push({ propertyId, type: PropertiesType.SPECIAL_USE });
+      if (isHospitality) propertyTypes.push({ propertyId, type: PropertiesType.HOSPITALITY });
+
+      if (propertyTypes.length > 0) {
+        await tx.propertyTypeOnProperty.createMany({
+          data: propertyTypes,
+        });
+      }
+
+      // Update other info
+      await tx.propertyOtherInfo.upsert({
+        where: { propertyRecordId: propertyId },
+        update: {
+          smartTagId,
+          landSize: landSqFt,
+          use,
+          leaseStatus,
+          lastSaleDate: new Date(lastSaleDate),
+          dealStructure,
+          grossBuildingArea,
+          parcelId_or_apn: parseInt(parcelId),
+          safety: safetyInspection ? new Date(safetyInspection + '-01') : null,
+          legalPropertyAddress,
+          blockChain_and_tokenization: blockchainTokenization,
+          lastSale_or_rentPrice: lastSaleRentPrice,
+          propertyDescription,
+        },
+        create: {
+          propertyRecordId: propertyId,
+          smartTagId,
+          landSize: landSqFt,
+          use,
+          leaseStatus,
+          lastSaleDate: new Date(lastSaleDate),
+          dealStructure,
+          grossBuildingArea,
+          parcelId_or_apn: parseInt(parcelId),
+          safety: safetyInspection ? new Date(safetyInspection + '-01') : null,
+          legalPropertyAddress,
+          blockChain_and_tokenization: blockchainTokenization,
+          lastSale_or_rentPrice: lastSaleRentPrice,
+          propertyDescription,
+        },
+      });
+    });
+    await this.activityService.logActivity({
+      action: ActivityActions.PROPERTY_UPDATED,
+      entityId: propertyId,
+      entityType: ActivityEntityTypes.PROPERTY,
+      description: 'Updated property overview details',
+      metadata: updateData,
+    });
+    this.logger.log(`Property overview updated successfully for property ${propertyId}`);
+  }
+
+  /**
+   * Manually trigger Lambda update for a published property
+   * This can be called via API endpoint to manually sync blockchain
+   */
+  async syncPropertyToBlockchain(
+    propertyRecordId: number,
+    currentUser: AuthedReq['user'],
+  ): Promise<{ message: string }> {
+    const [property, userDetails] = await Promise.all([
+      this.prisma.property.findUnique({
+        where: { id: propertyRecordId },
+        select: {
+          id: true,
+          propertyId: true,
+          name: true,
+          tokenId: true,
+          secondaryType: true,
+          attachments: {
+            select: {
+              id: true,
+              filePath: true,
+            },
+          },
+          types: {
+            select: {
+              type: true,
+            },
+          },
+          otherInfo: {
+            select: {
+              attachmentIds: true,
+              imageIds: true,
+            },
+          },
+        },
+      }),
+      this.prisma.user.findUnique({
+        where: { id: currentUser.id },
+        select: { email: true, fullName: true },
+      }),
+    ]);
+
+    // Early validation checks
+    if (!property) {
+      throw new NotFoundException('Property not found');
+    }
+
+    if (!property.tokenId) {
+      throw new BadRequestException(
+        'Property must be published (have tokenId) before it can be synced to blockchain. Use publish endpoint first.',
+      );
+    }
+
+    // Include ALL attachments that are in attachmentIds (all files in attachmentIds go to metadata)
+    const attachmentIds = property.otherInfo?.attachmentIds || [];
+    const attachmentsForMetadata = property.attachments.filter((attachment) =>
+      attachmentIds.includes(attachment.id),
+    );
+
+    if (!attachmentsForMetadata || attachmentsForMetadata.length === 0) {
+      throw new BadRequestException(
+        'Property must have at least one attachment in attachmentIds to sync to blockchain',
+      );
+    }
+
+    if (!userDetails?.email) {
+      throw new BadRequestException('User email not found');
+    }
+
+    // Include all attachments from attachmentIds in fileUrls
+    const fileUrls = attachmentsForMetadata.map((attachment) => attachment.filePath);
+    const propertyType =
+      property.types && property.types.length > 0
+        ? property.types.map((t) => t.type).join(', ')
+        : property.secondaryType
+          ? String(property.secondaryType)
+          : '';
+
+    this.logger.log(
+      `Manually syncing property ${property.propertyId} to blockchain with ${fileUrls.length} attachments from attachmentIds`,
+    );
+
+    try {
+      const balanceEth = await this.blockchainService.getWalletBalanceEth();
+      const balanceWei = parseFloat(balanceEth);
+
+      if (balanceWei === 0) {
+        this.logger.warn(`Wallet balance is zero: ${balanceEth} POL`);
+        const errorMessage = `Insufficient balance in wallet. Current balance: ${balanceEth} POL. Please add funds to complete the transaction.`;
+
+        const propertyRecord = await this.prisma.property.findUnique({
+          where: { propertyId: property.propertyId },
+          select: { id: true },
+        });
+
+        if (propertyRecord) {
+          await this.activityService.logActivity({
+            action: ActivityActions.PROPERTY_SYNC_BALANCE_ERROR,
+            entityType: ActivityEntityTypes.PROPERTY,
+            entityId: propertyRecord.id,
+            description: errorMessage,
+            metadata: {
+              propertyId: property.propertyId,
+              balance: balanceEth,
+              errorType: 'zero_balance',
+            },
+          });
+        }
+
+        throw new BadRequestException(errorMessage);
+      }
+
+      const dummyCID = 'QmYjtig7VJQ6XsnUjqqJvj7QaMcCAwtrgNdahSiFofrE7o';
+      const dummyTokenId = 1;
+
+      this.logger.log(
+        `Estimating gas cost for update with dummy CID: ${dummyCID} and dummy tokenId: ${dummyTokenId}`,
+      );
+
+      const estimate = await this.blockchainService.estimateUpdatePropertyCost(
+        dummyTokenId,
+        dummyCID,
+      );
+      const estimatedCostWei = estimate.totalCostWei;
+      this.logger.log(
+        `Estimated gas cost for update: ${estimate.totalCostEth} POL (${estimatedCostWei.toString()} wei)`,
+      );
+
+      // Compare balance with estimated cost
+      const balanceWeiBigInt = BigInt(Math.floor(balanceWei * 1e18)); // Convert POL to wei
+      if (balanceWeiBigInt < estimatedCostWei) {
+        const estimatedCostEth = (Number(estimatedCostWei) / 1e18).toFixed(6);
+        this.logger.warn(
+          `Insufficient balance: ${balanceEth} POL < estimated cost: ${estimatedCostEth} POL`,
+        );
+        const errorMessage = `Insufficient balance in wallet. Current balance: ${balanceEth} POL. Estimated transaction cost: ${estimatedCostEth} POL. Please add funds to complete the transaction.`;
+
+        const propertyRecord = await this.prisma.property.findUnique({
+          where: { propertyId: property.propertyId },
+          select: { id: true },
+        });
+
+        if (propertyRecord) {
+          await this.activityService.logActivity({
+            action: ActivityActions.PROPERTY_SYNC_BALANCE_ERROR,
+            entityType: ActivityEntityTypes.PROPERTY,
+            entityId: propertyRecord.id,
+            description: errorMessage,
+            metadata: {
+              propertyId: property.propertyId,
+              balance: balanceEth,
+              estimatedCost: estimatedCostEth,
+              errorType: 'insufficient_balance',
+            },
+          });
+        }
+
+        throw new BadRequestException(errorMessage);
+      }
+
+      this.logger.log(
+        `Wallet balance check passed: ${balanceEth} POL (sufficient for transaction)`,
+      );
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error(`Failed to check wallet balance: ${errorMessage}`);
+      throw new BadRequestException(
+        `Failed to verify wallet balance. Please try again later. Error: ${errorMessage}`,
+      );
+    }
+
+    this.processBlockchainJob({
+      action: 'update',
+      propertyId: property.propertyId,
+      propertyName: property.name,
+      propertyType,
+      fileUrls,
+      userId: currentUser.id,
+      userEmail: userDetails.email,
+      userFullName: userDetails.fullName,
+      tokenId: property.tokenId,
+    }).catch((error) => {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Background blockchain sync job failed for property ${property.propertyId}: ${errorMessage}`,
+      );
+    });
+
+    return {
+      message: 'Property blockchain sync job started successfully',
+    };
+  }
+
+  /**
+   * Background method to process blockchain job (Lambda invocation, DB update, email)
+   */
+  private async processBlockchainJob(payload: {
+    action: 'register' | 'update';
+    propertyId: string;
+    propertyName: string;
+    propertyType?: string;
+    fileUrls: string[];
+    userId: number;
+    userEmail: string;
+    userFullName: string;
+    tokenId?: number;
+  }): Promise<void> {
+    const {
+      action,
+      propertyId,
+      propertyName,
+      propertyType,
+      fileUrls,
+      userId,
+      userEmail,
+      userFullName,
+      tokenId,
+    } = payload;
+
+    try {
+      this.logger.log(
+        `Processing blockchain ${action} job for property ${propertyId}, propertyType: "${propertyType || 'NOT PROVIDED'}"`,
+      );
+
+      // IDEMPOTENCY CHECK: Skip if property already has tokenId (already processed)
+      const existingProperty = await this.prisma.property.findUnique({
+        where: { propertyId },
+        select: { tokenId: true, status: true },
+      });
+
+      if (existingProperty?.tokenId && action === 'register') {
+        this.logger.warn(
+          `Property ${propertyId} already has tokenId ${existingProperty.tokenId}. Skipping duplicate processing.`,
+        );
+        return;
+      }
+
+      this.logger.log(`Invoking Lambda function for property ${propertyId}...`);
+
+      const result = await this.lambdaService.invokePropertyCreation({
+        action,
+        propertyId,
+        propertyName,
+        propertyType,
+        fileUrls,
+        userId,
+        userEmail,
+        userFullName,
+        tokenId,
+      });
+
+      // Validate result structure
+      if (!result || !result.data) {
+        this.logger.error(
+          `Lambda response is missing data field. Result: ${JSON.stringify(result)}`,
+        );
+        throw new Error(
+          `Invalid Lambda response structure: missing data field. Result: ${JSON.stringify(result)}`,
+        );
+      }
+
+      if (!result.data.tokenId || !result.data.transactionHash || !result.data.metadataCID) {
+        this.logger.error(
+          `Lambda response is missing required fields. Result: ${JSON.stringify(result)}`,
+        );
+        throw new Error(
+          `Lambda response missing required fields. Expected: tokenId, transactionHash, metadataCID. Got: ${JSON.stringify(result.data)}`,
+        );
+      }
+
+      this.logger.log(
+        `Lambda execution completed for property ${propertyId}. tokenId=${result.data.tokenId}, txHash=${result.data.transactionHash}, cid=${result.data.metadataCID}`,
+      );
+
+      this.logger.log(`Updating property ${propertyId} in database with blockchain data...`);
+
+      await this.prisma.property.update({
+        where: { propertyId: propertyId },
+        data: {
+          tokenId: result.data.tokenId,
+          transactionHash: result.data.transactionHash,
+          documentsCID: result.data.metadataCID,
+          status: PropertyStatus.APPROVED,
+        },
+      });
+
+      const propertyRecord = await this.prisma.property.findUnique({
+        where: { propertyId },
+        select: { id: true },
+      });
+
+      if (!propertyRecord) {
+        this.logger.error(`Property record not found for propertyId: ${propertyId}`);
+        throw new Error(`Property record not found for propertyId: ${propertyId}`);
+      }
+
+      // Send email notification only for 'register' action (not for 'update' from sync-blockchain)
+      if (action === 'register') {
+        try {
+          const actionUrl = `${process.env.WEBSITE_URL}/properties/${propertyRecord.id}/add-info`;
+
+          await this.emailService.sendEmail(EmailType.BLOCKCHAIN_TRANSACTION_COMPLETED, {
+            recipientEmail: userEmail,
+            recipientName: userFullName,
+            propertyName,
+            propertyId: propertyId,
+            transactionHash: result.data.transactionHash,
+            tokenId: result.data.tokenId,
+            explorerUrl: `https://etherscan.io/tx/${result.data.transactionHash}`,
+            actionUrl,
+            chainName: BLOCKCHAIN.CHAIN_NAME,
+            action,
+          });
+
+          this.logger.log(`Blockchain transaction ${action} completion email sent to ${userEmail}`);
+        } catch (emailError: unknown) {
+          const emailErrorMessage =
+            emailError instanceof Error ? emailError.message : 'Unknown error';
+          this.logger.error(
+            `Failed to send blockchain transaction completion email for property ${propertyId}: ${emailErrorMessage}`,
+          );
+        }
+      }
+
+      this.logger.log(`Successfully processed blockchain ${action} job for property ${propertyId}`);
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+
+      this.logger.error(`Blockchain job failed for property ${propertyId}: ${errorMessage}`);
+      if (err instanceof Error && err.stack) {
+        this.logger.error(`Error stack: ${err.stack}`);
+      }
+
+      throw err;
+    }
+  }
+
+  async uploadAttachments(
+    propertyId: number,
+    files: Express.Multer.File[],
+    currentUser: AuthedReq['user'],
+  ): Promise<Attachment[]> {
+    await this.checkPropertyPermission(propertyId, currentUser);
+
+    const uploadedAttachments: Attachment[] = [];
+
+    for (const file of files) {
+      try {
+        // Upload file to S3
+        const fileUrl = await this.s3Service.uploadFile(file);
+
+        // Save attachment record to database
+        const attachment = await this.prisma.attachment.create({
+          data: {
+            fileName: file.originalname,
+            fileSize: file.size,
+            fileType: file.mimetype,
+            filePath: fileUrl,
+            propertyId: propertyId,
+          },
+        });
+
+        uploadedAttachments.push(attachment);
+        this.logger.log(
+          `Attachment uploaded successfully: ${file.originalname} for property ${propertyId}`,
+        );
+      } catch (error) {
+        this.logger.error(`Failed to upload attachment ${file.originalname}:`, error);
+        throw new BadRequestException(`Failed to upload file: ${file.originalname}`);
+      }
+    }
+    await this.activityService.logActivity({
+      action: ActivityActions.PROPERTY_REMOVE_ATTACHMENT,
+      entityId: propertyId ?? undefined,
+      entityType: ActivityEntityTypes.PROPERTY,
+      description: `Upload attachments to property.`,
+      metadata: uploadedAttachments.map((attachment) => ({
+        name: attachment.fileName,
+        propertyId: propertyId,
+        url: attachment.filePath,
+      })),
+    });
+    return uploadedAttachments;
+  }
+
+  async getInvitedUsers(
+    propertyId: number,
+    query: { page?: number; limit?: number },
+  ): Promise<PaginatedInvitedUsersResponseDto> {
+    const { page = 1, limit = 10 } = query;
+    const skip = (page - 1) * limit;
+
+    const property = await this.prisma.property.findUnique({
+      where: { id: propertyId },
+      select: { id: true },
+    });
+    if (!property) throw new NotFoundException(`Property ${propertyId} not found`);
+
+    const grouped = await this.prisma.userInviteRole.groupBy({
+      by: ['userInviteId'],
+      where: { propertyId },
+      _max: { createdAt: true },
+      orderBy: { _max: { createdAt: 'desc' } },
+      skip,
+      take: limit,
+    });
+
+    const userInviteIds = grouped.map((g) => g.userInviteId);
+
+    if (userInviteIds.length === 0) {
+      return new PaginatedInvitedUsersResponseDto({
+        invitedUsers: [],
+        totalCount: 0,
+        hasMore: false,
+      });
+    }
+
+    const inviteRoles = await this.prisma.userInviteRole.findMany({
+      where: { propertyId, userInviteId: { in: userInviteIds } },
+      include: {
+        userInvite: { select: { id: true, email: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const groupedUsers = inviteRoles.reduce<Record<string, PropertyInvitedUsersResponse>>(
+      (acc, invite) => {
+        const key = invite.userInvite.id;
+        if (!acc[key]) {
+          acc[key] = {
+            id: invite.userInvite.id,
+            email: invite.userInvite.email,
+            roles: [],
+            createdAt: invite.createdAt,
+            status: invite.status,
+          };
+        }
+        acc[key].roles.push(invite.role);
+        return acc;
+      },
+      {},
+    );
+
+    const totalCount = await this.prisma.userInviteRole.groupBy({
+      by: ['userInviteId'],
+      where: { propertyId },
+      _count: { userInviteId: true },
+    });
+
+    const total = totalCount.length;
+    const hasMore = skip + limit < total;
+
+    return new PaginatedInvitedUsersResponseDto({
+      invitedUsers: Object.values(groupedUsers).sort((a, b) => {
+        const aDate = a.createdAt ? a.createdAt.getTime() : 0;
+        const bDate = b.createdAt ? b.createdAt.getTime() : 0;
+        return bDate - aDate;
+      }),
+      totalCount: total,
+      hasMore,
+    });
+  }
+
+  async getPropertyUsers(
+    propertyId: number,
+    query: { page?: number; limit?: number },
+  ): Promise<PaginatedPropertyUsersResponseDto> {
+    const { page = 1, limit = 10 } = query;
+    const skip = (page - 1) * limit;
+
+    const property = await this.prisma.property.findUnique({
+      where: { id: propertyId },
+      select: { id: true },
+    });
+    if (!property) throw new NotFoundException(`Property ${propertyId} not found`);
+
+    const grouped = await this.prisma.propertyUser.groupBy({
+      by: ['userId'],
+      where: { propertyId },
+      _max: { createdAt: true },
+      orderBy: { _max: { createdAt: 'desc' } },
+      skip,
+      take: limit,
+    });
+
+    const userIds = grouped.map((g) => g.userId);
+    if (userIds.length === 0) {
+      return new PaginatedPropertyUsersResponseDto({
+        users: [],
+        totalCount: 0,
+        hasMore: false,
+      });
+    }
+
+    const propertyUsers = await this.prisma.propertyUser.findMany({
+      where: { propertyId, userId: { in: userIds } },
+      include: {
+        user: { select: { id: true, email: true, fullName: true } },
+        userRole: { select: { role: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const groupedUsers = propertyUsers.reduce<Record<number, PropertyUserResponseDto>>(
+      (acc, record) => {
+        const key = record.user.id;
+        if (!acc[key]) {
+          acc[key] = {
+            id: record.user.id,
+            email: record.user.email,
+            fullName: record.user.fullName,
+            roles: [],
+            createdAt: record.createdAt,
+          };
+        }
+        if (record.userRole.role && Object.values(Role).includes(record.userRole.role)) {
+          acc[key].roles.push(record.userRole.role);
+        }
+        return acc;
+      },
+      {},
+    );
+
+    const totalCount = await this.prisma.propertyUser.groupBy({
+      by: ['userId'],
+      where: { propertyId },
+      _count: { userId: true },
+    });
+
+    const total = totalCount.length;
+    const hasMore = skip + limit < total;
+
+    return new PaginatedPropertyUsersResponseDto({
+      users: Object.values(groupedUsers).sort((a, b) => {
+        const aDate = a.createdAt ? a.createdAt.getTime() : 0;
+        const bDate = b.createdAt ? b.createdAt.getTime() : 0;
+        return bDate - aDate;
+      }),
+      totalCount: total,
+      hasMore,
+    });
+  }
+
+  async deletePropertyUser(propertyId: number, userId: number, currentUserId: number) {
+    const property = await this.prisma.property.findUnique({
+      where: { id: propertyId },
+      select: { id: true, createdById: true },
+    });
+
+    if (!property) {
+      throw new NotFoundException(`Property ${propertyId} not found`);
+    }
+
+    if (property.createdById !== currentUserId) {
+      throw new ForbiddenException('You are not authorized to remove users from this property');
+    }
+
+    const propertyUser = await this.prisma.propertyUser.findFirst({
+      where: { propertyId, userId },
+    });
+
+    if (!propertyUser) {
+      throw new NotFoundException(`User ${userId} is not associated with this property`);
+    }
+
+    await this.prisma.propertyUser.delete({
+      where: { id: propertyUser.id },
+    });
+
+    return {
+      message: `User ${userId} has been removed from property ${propertyId}`,
+      deletedUserId: userId,
+      propertyId,
+    };
   }
 }
