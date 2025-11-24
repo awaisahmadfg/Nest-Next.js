@@ -3,12 +3,15 @@ import { LambdaClient, InvokeCommand, InvokeCommandInput } from '@aws-sdk/client
 import { ConfigService } from '@nestjs/config';
 
 export interface LambdaPropertyCreationRequest {
+  action: 'register' | 'update';
   propertyId: string;
   propertyName: string;
+  propertyType?: string;
   fileUrls: string[];
   userId: number;
   userEmail: string;
   userFullName: string;
+  tokenId?: number;
 }
 
 export interface LambdaPropertyCreationResponse {
@@ -59,26 +62,48 @@ export class LambdaService {
       );
 
       // Request object into JSON
-      const payload = JSON.stringify(request);
+      const requestPayload = JSON.stringify(request);
 
       const params: InvokeCommandInput = {
         FunctionName: this.functionName,
         InvocationType: 'RequestResponse',
-        Payload: payload,
+        Payload: requestPayload,
       };
 
       const command = new InvokeCommand(params);
-      // Calls the Lambda function and waits for its response
       const response = await this.lambdaClient.send(command);
 
       if (!response.Payload) {
         throw new Error('Lambda response payload is empty');
       }
 
-      // Converts the response back into a JavaScript object
-      const result = JSON.parse(new TextDecoder().decode(response.Payload)) as
-        | LambdaPropertyCreationResponse
-        | LambdaErrorResponse;
+      const payloadString = new TextDecoder().decode(response.Payload);
+      const responsePayload: unknown = JSON.parse(payloadString);
+
+      let result: LambdaPropertyCreationResponse | LambdaErrorResponse;
+
+      // Type guard to check if it's API Gateway format
+      if (
+        typeof responsePayload === 'object' &&
+        responsePayload !== null &&
+        'body' in responsePayload &&
+        typeof (responsePayload as { body: unknown }).body === 'string'
+      ) {
+        const apiGatewayResponse = responsePayload as { body: string; statusCode?: number };
+        result = JSON.parse(apiGatewayResponse.body) as
+          | LambdaPropertyCreationResponse
+          | LambdaErrorResponse;
+
+        if (apiGatewayResponse.statusCode && apiGatewayResponse.statusCode >= 400) {
+          const errorResult = result as LambdaErrorResponse;
+          throw new BadRequestException(
+            `Lambda execution failed: ${errorResult.error || 'Unknown error'}`,
+          );
+        }
+      } else {
+        // Direct response format (shouldn't happen with current handler, but handle it)
+        result = responsePayload as LambdaPropertyCreationResponse | LambdaErrorResponse;
+      }
 
       if (response.FunctionError) {
         this.logger.error(
@@ -91,6 +116,12 @@ export class LambdaService {
       }
 
       const successResult = result as LambdaPropertyCreationResponse;
+
+      // Validate that data exists
+      if (!successResult.data) {
+        this.logger.error(`Lambda response missing data field: ${JSON.stringify(successResult)}`);
+        throw new BadRequestException('Lambda response is missing required data field');
+      }
 
       this.logger.log(`Lambda function completed successfully for property ${request.propertyId}`);
 
