@@ -9,14 +9,6 @@ import { notificationService } from '@/services/notificationService';
 export enum NotificationType {
   ROLE_APPROVED = 'ROLE_APPROVED',
   ROLE_REJECTED = 'ROLE_REJECTED',
-  ROLE_PENDING = 'ROLE_PENDING',
-  PROPERTY_INVITED = 'PROPERTY_INVITED',
-  PROPERTY_APPROVED = 'PROPERTY_APPROVED',
-  PROPERTY_REJECTED = 'PROPERTY_REJECTED',
-  INVITATION_RECEIVED = 'INVITATION_RECEIVED',
-  INVITATION_ACCEPTED = 'INVITATION_ACCEPTED',
-  SYSTEM_ANNOUNCEMENT = 'SYSTEM_ANNOUNCEMENT',
-  SYSTEM_ALERT = 'SYSTEM_ALERT',
 }
 
 export interface NotificationData {
@@ -25,8 +17,10 @@ export interface NotificationData {
   type: NotificationType;
   title: string;
   message: string;
-  status: 'UNREAD' | 'READ' | 'ARCHIVED';
+  status: 'UNREAD' | 'READ';
   actionBy?: number | null;
+  actionByUserProfileImageUrl?: string | null;
+  actionByUserFullName?: string | null;
   relatedEntityId?: number | null;
   relatedEntityType?: string | null;
   reason?: string | null;
@@ -38,6 +32,9 @@ export function useWebSocketNotifications() {
   const { accessToken } = useAuth();
   const { addNotification } = useAppStore();
   const socketRef = useRef<Socket | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const isReconnectingRef = useRef(false);
+  const wasConnectedRef = useRef(false);
   const [notifications, setNotifications] = useState<NotificationData[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -57,7 +54,6 @@ export function useWebSocketNotifications() {
     // Ensure URL doesn't end with a slash
     apiUrl = apiUrl.replace(/\/$/, '');
 
-    console.log('[WS] Using API URL for notifications:', apiUrl);
     return apiUrl;
   }, []);
 
@@ -72,7 +68,6 @@ export function useWebSocketNotifications() {
     }
 
     const socketUrl = `${apiUrl}/notifications`;
-    console.log('[WS] Attempting to connect to:', socketUrl);
 
     const socket = io(socketUrl, {
       auth: { token: accessToken },
@@ -84,69 +79,67 @@ export function useWebSocketNotifications() {
       reconnectionAttempts: 5,
       timeout: 20000,
       forceNew: true,
+      autoConnect: true,
     });
 
     socket.on('connect', () => {
-      console.log('[WS] Connected to /notifications', { apiUrl, socketId: socket.id });
       setIsConnected(true);
+      reconnectAttemptsRef.current = 0;
+      isReconnectingRef.current = false;
+      wasConnectedRef.current = true;
     });
 
     socket.on('disconnect', (reason) => {
-      console.log('[WS] Disconnected from /notifications', { reason });
       setIsConnected(false);
+      // Only log unexpected disconnections, not normal ones
+      if (reason === 'io server disconnect' || reason === 'io client disconnect') {
+        return;
+      }
     });
 
     socket.on('connect_error', (error) => {
-      console.error('[WS] Connection error for /notifications', {
-        message: error.message,
-        error: error,
-        apiUrl: `${apiUrl}/notifications`,
-      });
+      reconnectAttemptsRef.current += 1;
+      isReconnectingRef.current = true;
       setIsConnected(false);
+
+      // Only log errors after multiple failed attempts or for non-retryable errors
+      if (reconnectAttemptsRef.current > 3) {
+        if (process.env.NODE_ENV === 'development') {
+          console.warn(
+            '[WS] Connection error (attempts:',
+            reconnectAttemptsRef.current,
+            '):',
+            error.message
+          );
+        }
+      }
     });
 
     socket.on('error', (error) => {
-      console.error('[WS] Socket error:', error);
+      // Only log non-reconnection errors
+      if (!isReconnectingRef.current && process.env.NODE_ENV === 'development') {
+        console.error('[WS] Socket error:', error);
+      }
     });
 
     socket.on('notification', (data: NotificationData) => {
-      console.log('[WS] Received notification', data);
-
       const notificationWithId: NotificationData = {
         ...data,
         id: data.id || `notif-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       };
 
-      // Add to notifications list if not already present
       setNotifications((prev) => {
         if (prev.some((n) => n.id === notificationWithId.id)) return prev;
         return [notificationWithId, ...prev].slice(0, 50);
       });
 
-      // Update unread count
       setUnreadCount((prev) => prev + 1);
 
-      // Show toast notification
       addNotification({
-        type:
-          data.type === NotificationType.ROLE_APPROVED
-            ? 'success'
-            : data.type === NotificationType.ROLE_REJECTED
-              ? 'error'
-              : 'info',
+        type: data.type === NotificationType.ROLE_REJECTED ? 'error' : 'success',
         title: data.title,
         message: data.message,
       });
-    });
-
-    socket.on('notification_read', (data: { notificationId: string }) => {
-      setNotifications((prev) =>
-        prev.map((n) =>
-          n.id === data.notificationId
-            ? { ...n, status: 'READ' as const, readAt: new Date().toISOString() }
-            : n
-        )
-      );
     });
 
     socketRef.current = socket;
@@ -161,7 +154,7 @@ export function useWebSocketNotifications() {
   }, []);
 
   const fetchNotifications = useCallback(
-    async (params?: { status?: 'UNREAD' | 'READ' | 'ARCHIVED'; page?: number; limit?: number }) => {
+    async (params?: { status?: 'UNREAD' | 'READ'; page?: number; limit?: number }) => {
       try {
         setIsLoading(true);
         const response = await notificationService.getNotifications({
@@ -169,7 +162,6 @@ export function useWebSocketNotifications() {
           ...params,
         });
 
-        // Convert API response to NotificationData format
         const formattedNotifications: NotificationData[] = response.notifications.map((n) => ({
           id: n.id,
           userId: n.userId,
@@ -178,6 +170,8 @@ export function useWebSocketNotifications() {
           message: n.message,
           status: n.status,
           actionBy: n.actionBy ?? undefined,
+          actionByUserProfileImageUrl: n.actionByUserProfileImageUrl ?? undefined,
+          actionByUserFullName: n.actionByUserFullName ?? undefined,
           relatedEntityId: n.relatedEntityId ?? undefined,
           relatedEntityType: n.relatedEntityType ?? undefined,
           reason: n.reason ?? undefined,
@@ -188,7 +182,9 @@ export function useWebSocketNotifications() {
         setNotifications(formattedNotifications);
         setUnreadCount(response.unreadCount);
       } catch (error) {
-        console.error('[Notifications] Failed to fetch notifications:', error);
+        if (process.env.NODE_ENV === 'development') {
+          console.error('[Notifications] Failed to fetch notifications:', error);
+        }
       } finally {
         setIsLoading(false);
       }
@@ -201,44 +197,38 @@ export function useWebSocketNotifications() {
       const response = await notificationService.getUnreadCount();
       setUnreadCount(response.unreadCount);
     } catch (error) {
-      console.error('[Notifications] Failed to fetch unread count:', error);
+      if (process.env.NODE_ENV === 'development') {
+        console.error('[Notifications] Failed to fetch unread count:', error);
+      }
     }
   }, []);
 
-  const markAsRead = useCallback(
-    async (notificationId: string) => {
-      try {
-        // Optimistically update UI
-        setNotifications((prev) =>
-          prev.map((n) =>
-            n.id === notificationId
-              ? { ...n, status: 'READ' as const, readAt: new Date().toISOString() }
-              : n
-          )
-        );
-
-        // Update unread count
-        setUnreadCount((prev) => Math.max(0, prev - 1));
-
-        // Call API
-        await notificationService.markAsRead(notificationId);
-
-        // Also emit via WebSocket if connected
-        if (socketRef.current?.connected) {
-          socketRef.current.emit('mark_as_read', { notificationId });
-        }
-      } catch (error) {
-        console.error('[Notifications] Failed to mark as read:', error);
-        // Revert optimistic update on error
-        fetchNotifications();
+  const markAllAsRead = useCallback(async () => {
+    try {
+      if (unreadCount === 0) {
+        return;
       }
-    },
-    [fetchNotifications]
-  );
 
-  const clearNotifications = useCallback(() => {
-    setNotifications([]);
-  }, []);
+      setNotifications((prev) =>
+        prev.map((n) => ({
+          ...n,
+          status: 'READ' as const,
+          readAt: n.readAt || new Date().toISOString(),
+        }))
+      );
+
+      setUnreadCount(0);
+
+      await notificationService.markAllAsRead();
+      await fetchUnreadCount();
+    } catch (error) {
+      if (process.env.NODE_ENV === 'development') {
+        console.error('[Notifications] Failed to mark all as read:', error);
+      }
+      fetchNotifications();
+      fetchUnreadCount();
+    }
+  }, [unreadCount, fetchNotifications, fetchUnreadCount]);
 
   // Fetch notifications on mount and when accessToken is available
   useEffect(() => {
@@ -256,16 +246,16 @@ export function useWebSocketNotifications() {
     return disconnect;
   }, [accessToken, connect, disconnect]);
 
+  // Determine if we're actually reconnecting (was connected before, now disconnected)
+  const isReconnecting = !isConnected && wasConnectedRef.current;
+
   return {
     notifications,
     isConnected,
+    isReconnecting,
     unreadCount,
     isLoading,
-    markAsRead,
-    clearNotifications,
+    markAllAsRead,
     fetchNotifications,
-    fetchUnreadCount,
-    connect,
-    disconnect,
   };
 }
