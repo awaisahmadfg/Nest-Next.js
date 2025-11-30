@@ -10,11 +10,11 @@ import {
   List,
   ListItemButton,
   ListItemText,
+  Avatar,
 } from '@mui/material';
 import NotificationsIcon from '@mui/icons-material/Notifications';
 import { useWebSocketNotifications, NotificationData } from '@/hooks/useWebSocketNotifications';
 
-// Simple time-ago formatter similar to the design
 const formatTimeAgo = (dateString: string): string => {
   try {
     const date = new Date(dateString);
@@ -32,31 +32,28 @@ const formatTimeAgo = (dateString: string): string => {
 };
 
 export function NotificationBell() {
-  const { notifications, unreadCount, markAsRead, isConnected, isLoading, fetchNotifications } =
-    useWebSocketNotifications();
+  const {
+    notifications,
+    unreadCount,
+    markAllAsRead,
+    isReconnecting,
+    isLoading,
+    fetchNotifications,
+  } = useWebSocketNotifications();
   const [anchorEl, setAnchorEl] = useState<HTMLButtonElement | null>(null);
 
   const handleClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       setAnchorEl(event.currentTarget);
-      // Fetch fresh notifications from database when bell is clicked
       fetchNotifications();
+      markAllAsRead();
     },
-    [fetchNotifications]
+    [fetchNotifications, markAllAsRead]
   );
 
   const handleClose = useCallback(() => {
     setAnchorEl(null);
   }, []);
-
-  const handleNotificationClick = useCallback(
-    (notification: NotificationData) => {
-      if (notification.id && notification.status === 'UNREAD') {
-        markAsRead(notification.id);
-      }
-    },
-    [markAsRead]
-  );
 
   const open = Boolean(anchorEl);
   const id = open ? 'notification-popover' : undefined;
@@ -129,7 +126,7 @@ export function NotificationBell() {
             </Typography>
           </Box>
 
-          {!isConnected && (
+          {isReconnecting && (
             <Typography variant="caption" sx={{ color: '#f97316', mb: 1, display: 'block' }}>
               Reconnecting to notifications…
             </Typography>
@@ -153,7 +150,6 @@ export function NotificationBell() {
                 <NotificationItem
                   key={notification.id || `unread-${notification.createdAt}`}
                   notification={notification}
-                  onClick={handleNotificationClick}
                   isUnread
                 />
               ))}
@@ -161,7 +157,6 @@ export function NotificationBell() {
                 <NotificationItem
                   key={notification.id || `read-${notification.createdAt}`}
                   notification={notification}
-                  onClick={handleNotificationClick}
                   isUnread={false}
                 />
               ))}
@@ -175,27 +170,61 @@ export function NotificationBell() {
 
 interface NotificationItemProps {
   notification: NotificationData;
-  onClick: (notification: NotificationData) => void;
   isUnread: boolean;
 }
 
-function NotificationItem({ notification, onClick, isUnread }: NotificationItemProps) {
+function NotificationItem({ notification, isUnread }: NotificationItemProps) {
   const formatDate = formatTimeAgo;
 
   return (
     <ListItemButton
-      onClick={() => onClick(notification)}
       sx={{
         backgroundColor: isUnread ? '#111827' : '#020617', // unread vs read
         borderBottom: '1px solid #1f2937',
         py: 1.5,
         px: 2,
         alignItems: 'flex-start',
+        gap: 1.5,
         '&:hover': {
           backgroundColor: isUnread ? '#1f2937' : '#111827',
         },
       }}
     >
+      {/* Avatar with unread indicator */}
+      <Box sx={{ position: 'relative', flexShrink: 0 }}>
+        {isUnread && (
+          <Box
+            sx={{
+              position: 'absolute',
+              top: -2,
+              left: -2,
+              width: 12,
+              height: 12,
+              borderRadius: '50%',
+              backgroundColor: '#2970FF',
+              border: '2px solid #020617',
+              zIndex: 1,
+            }}
+          />
+        )}
+        <Avatar
+          src={notification.actionByUserProfileImageUrl || undefined}
+          alt="User"
+          sx={{
+            width: 40,
+            height: 40,
+            bgcolor: '#374151',
+            fontSize: '0.875rem',
+          }}
+        >
+          {notification.actionByUserProfileImageUrl
+            ? null
+            : (notification.actionByUserFullName || notification.title || 'U')
+                .charAt(0)
+                .toUpperCase()}
+        </Avatar>
+      </Box>
+
       <ListItemText
         primary={
           <Typography
@@ -214,7 +243,7 @@ function NotificationItem({ notification, onClick, isUnread }: NotificationItemP
             <Typography
               variant="caption"
               sx={{
-                color: isUnread ? '#e5e7eb' : '#9ca3af',
+                color: 'white',
                 display: 'block',
                 mb: 0.5,
               }}
@@ -224,8 +253,8 @@ function NotificationItem({ notification, onClick, isUnread }: NotificationItemP
             <Typography
               variant="caption"
               sx={{
-                color: '#6b7280',
-                fontSize: '0.7rem',
+                color: '#B0B0B0',
+                fontSize: '0.75rem',
               }}
             >
               {formatDate(notification.createdAt)}
