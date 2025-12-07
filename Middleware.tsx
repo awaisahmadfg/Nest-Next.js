@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
-// Define protected routes that require authentication
+// Define protected routes that require
 const protectedRoutes = [
   '/dashboard',
   '/profile',
