@@ -1,13 +1,10 @@
 'use client';
 
-import React, { useState } from 'react';
-import { Box, Typography, Collapse, IconButton } from '@mui/material';
-import {
-  ExpandMore as ExpandMoreIcon,
-  ExpandLess as ExpandLessIcon,
-  OpenInNew as OpenInNewIcon,
-} from '@mui/icons-material';
+import React from 'react';
+import { Box, Typography, Grid } from '@mui/material';
+import { OpenInNew as OpenInNewIcon } from '@mui/icons-material';
 import { BLOCKCHAIN } from '@/lib/constants';
+import { CustomCard, CustomCardContent } from '../ui';
 
 interface BlockchainDetailsProps {
   contractAddress?: string;
@@ -18,20 +15,20 @@ interface BlockchainDetailsProps {
 }
 
 const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
-  contractAddress = '0xec8155c8D9B453f1c6BDe731E91468116185Cb1f',
+  contractAddress,
   tokenId,
   tokenStandard = 'ERC721',
   chain = BLOCKCHAIN.CHAIN_NAME,
   metadataCid,
 }) => {
-  const [expanded, setExpanded] = useState(false);
+  const defaultContractAddress = process.env.NEXT_PUBLIC_SMART_TAGS_CONTRACT_ADDRESS;
 
-  const handleToggle = () => {
-    setExpanded(!expanded);
-  };
+  const etherscanBaseUrl = process.env.NEXT_PUBLIC_ETHERSCAN_BASE_URL;
+
+  const finalContractAddress = (contractAddress || defaultContractAddress) as string;
 
   const handleContractAddressClick = () => {
-    const etherscanUrl = `https://sepolia.etherscan.io/address/${contractAddress}`;
+    const etherscanUrl = `${etherscanBaseUrl as string}/address/${finalContractAddress}`;
     window.open(etherscanUrl, '_blank', 'noopener,noreferrer');
   };
 
@@ -48,117 +45,57 @@ const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
   };
 
   return (
-    <Box>
-      {/* Header */}
-      <Box
-        sx={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          mb: 2,
-          cursor: 'pointer',
-        }}
-        onClick={handleToggle}
-      >
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <Typography
-            variant="h6"
-            sx={{
-              color: '#FFFFFF',
-              fontWeight: 600,
-              fontSize: '18px',
-              pb: 0.5,
-            }}
-          >
-            Blockchain details
-          </Typography>
-        </Box>
-        <IconButton
-          size="small"
-          sx={{
-            color: '#FFFFFF',
-            '&:hover': {
-              bgcolor: 'rgba(255, 255, 255, 0.1)',
-            },
-          }}
-        >
-          {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
-        </IconButton>
-      </Box>
-
-      {/* Collapsible Content */}
-      <Collapse in={expanded}>
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          {/* Contract Address */}
+    <CustomCard sx={{ mb: 2, border: 0 }}>
+      <CustomCardContent sx={{ p: { xs: 0, md: 3 } }}>
+        <Box>
+          {/* Header */}
           <Box
             sx={{
               display: 'flex',
-              justifyContent: 'space-between',
               alignItems: 'center',
-              p: 2,
-              bgcolor: '#1C1C1C',
+              justifyContent: 'space-between',
+              mb: 2,
             }}
           >
-            <Typography
-              variant="body2"
-              sx={{
-                color: '#D1D1D1',
-                fontWeight: 400,
-                fontSize: '16px',
-              }}
-            >
-              Contract Address
-            </Typography>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
               <Typography
-                variant="body2"
+                variant="h6"
                 sx={{
-                  color: '#528BFF',
+                  color: '#FFFFFF',
                   fontWeight: 600,
-                  fontFamily: 'monospace',
-                  cursor: 'pointer',
-                  '&:hover': {
-                    textDecoration: 'underline',
-                  },
+                  fontSize: '18px',
+                  pb: 0.5,
                 }}
-                onClick={handleContractAddressClick}
               >
-                {formatAddress(contractAddress)}
+                Blockchain Details:
               </Typography>
-              <OpenInNewIcon
-                sx={{
-                  color: '#528BFF',
-                  fontSize: '16px',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                }}
-                onClick={handleContractAddressClick}
-              />
             </Box>
           </Box>
 
-          {/* Token ID */}
-          <Box
-            sx={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              p: 2,
-            }}
-          >
-            <Typography
-              variant="body2"
-              sx={{
-                color: '#D1D1D1',
-                fontWeight: 400,
-                fontSize: '16px',
-              }}
-            >
-              Token ID
-            </Typography>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              {tokenId ? (
-                <>
+          {/* Content */}
+          <Grid container spacing={2}>
+            {/* Contract Address */}
+            <Grid size={{ xs: 12, md: 6 }}>
+              <Box
+                sx={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  p: 2,
+                  bgcolor: '#1C1C1C',
+                }}
+              >
+                <Typography
+                  variant="body2"
+                  sx={{
+                    color: '#D1D1D1',
+                    fontWeight: 400,
+                    fontSize: '16px',
+                  }}
+                >
+                  Contract Address
+                </Typography>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                   <Typography
                     variant="body2"
                     sx={{
@@ -170,99 +107,157 @@ const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
                         textDecoration: 'underline',
                       },
                     }}
-                    onClick={handleTokenIdClick}
+                    onClick={handleContractAddressClick}
                   >
-                    {tokenId}
+                    {formatAddress(finalContractAddress)}
                   </Typography>
                   <OpenInNewIcon
                     sx={{
                       color: '#528BFF',
-                      fontWeight: 600,
                       fontSize: '16px',
+                      fontWeight: 600,
                       cursor: 'pointer',
                     }}
-                    onClick={handleTokenIdClick}
+                    onClick={handleContractAddressClick}
                   />
-                </>
-              ) : (
+                </Box>
+              </Box>
+            </Grid>
+
+            {/* Token ID */}
+            <Grid size={{ xs: 12, md: 6 }}>
+              <Box
+                sx={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  p: 2,
+                  bgcolor: '#1C1C1C',
+                }}
+              >
                 <Typography
                   variant="body2"
                   sx={{
-                    color: '#757575',
-                    fontStyle: 'italic',
+                    color: '#D1D1D1',
+                    fontWeight: 400,
+                    fontSize: '16px',
                   }}
                 >
-                  Not available
+                  Token ID
                 </Typography>
-              )}
-            </Box>
-          </Box>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  {tokenId ? (
+                    <>
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          color: '#528BFF',
+                          fontWeight: 600,
+                          fontFamily: 'monospace',
+                          cursor: 'pointer',
+                          '&:hover': {
+                            textDecoration: 'underline',
+                          },
+                        }}
+                        onClick={handleTokenIdClick}
+                      >
+                        {tokenId}
+                      </Typography>
+                      <OpenInNewIcon
+                        sx={{
+                          color: '#528BFF',
+                          fontWeight: 600,
+                          fontSize: '16px',
+                          cursor: 'pointer',
+                        }}
+                        onClick={handleTokenIdClick}
+                      />
+                    </>
+                  ) : (
+                    <Typography
+                      variant="body2"
+                      sx={{
+                        color: '#757575',
+                        fontStyle: 'italic',
+                      }}
+                    >
+                      Not available
+                    </Typography>
+                  )}
+                </Box>
+              </Box>
+            </Grid>
 
-          {/* Token Standard */}
-          <Box
-            sx={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              p: 2,
-              bgcolor: '#1C1C1C',
-            }}
-          >
-            <Typography
-              variant="body2"
-              sx={{
-                color: '#D1D1D1',
-                fontWeight: 400,
-                fontSize: '16px',
-              }}
-            >
-              Token Standard
-            </Typography>
-            <Typography
-              variant="body2"
-              sx={{
-                color: '#FFFFFF',
-                fontFamily: 'monospace',
-                fontWeight: '500',
-              }}
-            >
-              {tokenStandard}
-            </Typography>
-          </Box>
+            {/* Token Standard */}
+            <Grid size={{ xs: 12, md: 6 }}>
+              <Box
+                sx={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  p: 2,
+                  // bgcolor: '#1C1C1C',
+                }}
+              >
+                <Typography
+                  variant="body2"
+                  sx={{
+                    color: '#D1D1D1',
+                    fontWeight: 400,
+                    fontSize: '16px',
+                  }}
+                >
+                  Token Standard
+                </Typography>
+                <Typography
+                  variant="body2"
+                  sx={{
+                    color: '#FFFFFF',
+                    fontFamily: 'monospace',
+                    fontWeight: '500',
+                  }}
+                >
+                  {tokenStandard}
+                </Typography>
+              </Box>
+            </Grid>
 
-          {/* Chain */}
-          <Box
-            sx={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              p: 2,
-            }}
-          >
-            <Typography
-              variant="body2"
-              sx={{
-                color: '#D1D1D1',
-                fontWeight: 400,
-                fontSize: '16px',
-              }}
-            >
-              Chain
-            </Typography>
-            <Typography
-              variant="body2"
-              sx={{
-                color: '#FFFFFF',
-                fontFamily: 'monospace',
-                fontWeight: '500',
-              }}
-            >
-              {chain}
-            </Typography>
-          </Box>
+            {/* Chain */}
+            <Grid size={{ xs: 12, md: 6 }}>
+              <Box
+                sx={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  p: 2,
+                }}
+              >
+                <Typography
+                  variant="body2"
+                  sx={{
+                    color: '#D1D1D1',
+                    fontWeight: 400,
+                    fontSize: '16px',
+                  }}
+                >
+                  Chain
+                </Typography>
+                <Typography
+                  variant="body2"
+                  sx={{
+                    color: '#FFFFFF',
+                    fontFamily: 'monospace',
+                    fontWeight: '500',
+                  }}
+                >
+                  {chain}
+                </Typography>
+              </Box>
+            </Grid>
+          </Grid>
         </Box>
-      </Collapse>
-    </Box>
+      </CustomCardContent>
+    </CustomCard>
   );
 };
 
