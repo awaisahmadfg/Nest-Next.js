@@ -53,17 +53,47 @@ export class PinataService {
     }
   }
 
+  private isPinataFileLimitError(error: unknown): boolean {
+    if (!error) return false;
+
+    const errorMessage =
+      error instanceof Error
+        ? error.message
+        : typeof error === "string"
+          ? error
+          : JSON.stringify(error);
+    const errorString = JSON.stringify(error).toLowerCase();
+
+    const limitErrorPatterns = [
+      "maximum number of pins",
+      "pin limit",
+      "reached the maximum",
+      "too many pins",
+      "pin quota",
+      "exceeded.*pin",
+      "429",
+    ];
+
+    return limitErrorPatterns.some(
+      pattern =>
+        errorMessage.toLowerCase().includes(pattern.toLowerCase()) ||
+        errorString.includes(pattern.toLowerCase())
+    );
+  }
+
   async uploadFile(file: MulterFile): Promise<string> {
     try {
-      console.log(`Uploading file to Pinata: ${file.originalname}, size: ${file.size} bytes, mimeType: ${file.mimetype}`);
-      
+      console.log(
+        `Uploading file to Pinata: ${file.originalname}, size: ${file.size} bytes, mimeType: ${file.mimetype}`
+      );
+
       // Pinata SDK v1.0.0 expects a readable stream
       // Create stream from buffer
       const readableStream = Readable.from(file.buffer);
-      
+
       // Pinata SDK may need the stream to have a path property for proper file identification
       // This helps Pinata SDK identify the file name
-      Object.defineProperty(readableStream, 'path', {
+      Object.defineProperty(readableStream, "path", {
         value: file.originalname,
         writable: false,
         enumerable: true,
@@ -77,32 +107,42 @@ export class PinataService {
       };
 
       console.log(`Calling Pinata pinFileToIPFS`);
-      console.log(`File details: name=${file.originalname}, size=${file.size}, mimeType=${file.mimetype}`);
-      console.log(`Stream has path: ${!!(readableStream as any).path}`);
-      
-      // Call Pinata SDK - it expects stream as first parameter
-      const result = await this.pinata.pinFileToIPFS(
-        readableStream,
-        options
+      console.log(
+        `File details: name=${file.originalname}, size=${file.size}, mimeType=${file.mimetype}`
       );
-      
-      console.log(`Pinata upload successful. Result:`, JSON.stringify(result, null, 2));
-      
+      console.log(`Stream has path: ${!!(readableStream as any).path}`);
+
+      // Call Pinata SDK - it expects stream as first parameter
+      const result = await this.pinata.pinFileToIPFS(readableStream, options);
+
+      console.log(
+        `Pinata upload successful. Result:`,
+        JSON.stringify(result, null, 2)
+      );
+
       if (!result || !result.IpfsHash) {
-        throw new Error(`Pinata returned invalid response: ${JSON.stringify(result)}`);
+        throw new Error(
+          `Pinata returned invalid response: ${JSON.stringify(result)}`
+        );
       }
-      
+
       return result.IpfsHash;
     } catch (error) {
       console.error("Pinata upload error:", error);
-      
+
+      if (this.isPinataFileLimitError(error)) {
+        throw new Error(
+          "Pinata file limit reached. You have reached the maximum number of files (500) allowed on the free Pinata plan. Please upgrade your Pinata plan or remove some files to continue."
+        );
+      }
+
       // Log detailed error information
       if (error instanceof Error) {
         console.error(`Error name: ${error.name}`);
         console.error(`Error message: ${error.message}`);
         console.error(`Error stack: ${error.stack}`);
       }
-      
+
       // Check if it's a Pinata API error with response details
       if ((error as any)?.response) {
         const pinataError = error as any;
@@ -112,17 +152,22 @@ export class PinataService {
           data: pinataError.response?.data,
           headers: pinataError.response?.headers,
         });
-        
+
         if (pinataError.response?.data) {
-          const errorData = typeof pinataError.response.data === 'string' 
-            ? pinataError.response.data 
-            : JSON.stringify(pinataError.response.data);
+          const errorData =
+            typeof pinataError.response.data === "string"
+              ? pinataError.response.data
+              : JSON.stringify(pinataError.response.data);
           throw new Error(`Pinata API error: ${errorData}`);
         }
       }
-      
+
       const errorMessage =
-        error instanceof Error ? error.message : String(error);
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : JSON.stringify(error);
       throw new Error(`Failed to upload file to IPFS: ${errorMessage}`);
     }
   }
@@ -139,6 +184,13 @@ export class PinataService {
       return result.IpfsHash;
     } catch (error) {
       console.error("Pinata metadata upload error:", error);
+
+      if (this.isPinataFileLimitError(error)) {
+        throw new Error(
+          "Pinata file limit reached. You have reached the maximum number of files (500) allowed on the free Pinata plan. Please upgrade your Pinata plan or remove some files to continue."
+        );
+      }
+
       const errorMessage =
         error instanceof Error ? error.message : "Unknown error occurred";
       throw new Error(`Failed to upload metadata to IPFS: ${errorMessage}`);
@@ -304,28 +356,34 @@ export class PinataService {
       };
     } catch (error) {
       console.error(`Failed to upload file from S3 URL ${s3Url}:`, error);
-      
+
+      if (this.isPinataFileLimitError(error)) {
+        throw new Error(
+          "Pinata file limit reached. You have reached the maximum number of files (500) allowed on the free Pinata plan. Please upgrade your Pinata plan or remove some files to continue."
+        );
+      }
+
       // Log full error details for debugging
       if (error instanceof Error) {
         console.error(`Error name: ${error.name}`);
         console.error(`Error message: ${error.message}`);
         console.error(`Error stack: ${error.stack}`);
       }
-      
+
       // Check if it's an axios error with response details
       if ((error as any)?.response) {
         const axiosError = error as any;
         const status = axiosError.response?.status;
         const statusText = axiosError.response?.statusText;
         const data = axiosError.response?.data;
-        
+
         console.error(`Axios response error:`, {
           status,
           statusText,
-          data: typeof data === 'string' ? data.substring(0, 200) : data,
+          data: typeof data === "string" ? data.substring(0, 200) : data,
           headers: axiosError.response?.headers,
         });
-        
+
         if (status === 403) {
           throw new Error(
             `Access denied to S3 URL: ${s3Url}. Status: ${status} ${statusText}. The S3 bucket may be private and Lambda needs IAM permissions to access it, or the file URL is incorrect.`
@@ -337,7 +395,7 @@ export class PinataService {
           );
         }
         throw new Error(
-          `HTTP ${status} ${statusText} when downloading from S3 URL: ${s3Url}. Response: ${typeof data === 'string' ? data.substring(0, 200) : JSON.stringify(data)}`
+          `HTTP ${status} ${statusText} when downloading from S3 URL: ${s3Url}. Response: ${typeof data === "string" ? data.substring(0, 200) : JSON.stringify(data)}`
         );
       }
 
@@ -357,7 +415,11 @@ export class PinataService {
 
       // For other errors, provide detailed message with original error
       const errorMessage =
-        error instanceof Error ? error.message : String(error);
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : JSON.stringify(error);
       const errorName = error instanceof Error ? error.name : typeof error;
       throw new Error(
         `Failed to upload file from S3 URL: ${s3Url}. Error type: ${errorName}, Message: ${errorMessage}`
@@ -438,6 +500,12 @@ export class PinataService {
             const result = await this.uploadFileFromS3Url(s3Url);
             return result;
           } catch (error: unknown) {
+            if (this.isPinataFileLimitError(error)) {
+              throw new Error(
+                "Pinata file limit reached. You have reached the maximum number of files (500) allowed on the free Pinata plan. Please upgrade your Pinata plan or remove some files to continue."
+              );
+            }
+
             const message =
               error instanceof Error ? error.message : "Unknown error";
             console.error(
@@ -479,6 +547,12 @@ export class PinataService {
         })),
       };
     } catch (error: unknown) {
+      if (this.isPinataFileLimitError(error)) {
+        throw new Error(
+          "Pinata file limit reached. You have reached the maximum number of files (500) allowed on the free Pinata plan. Please upgrade your Pinata plan or remove some files to continue."
+        );
+      }
+
       const errorMessage =
         error instanceof Error ? error.message : "Unknown error occurred";
       console.error("Pinata upload failed:", errorMessage);
