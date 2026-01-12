@@ -1058,7 +1058,6 @@ enum NotificationType {
   PROPERTY_REJECTED
   INSPECTION_COMPLETED
 }
-
 enum NotificationStatus {
   UNREAD
   READ
