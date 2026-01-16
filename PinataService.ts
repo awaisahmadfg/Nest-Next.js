@@ -29,6 +29,34 @@ export class PinataService {
     }
   }
 
+  private isPinataFileLimitError(error: unknown): boolean {
+    if (!error) return false;
+
+    const errorMessage =
+      error instanceof Error
+        ? error.message
+        : typeof error === 'string'
+          ? error
+          : JSON.stringify(error);
+    const errorString = JSON.stringify(error).toLowerCase();
+
+    const limitErrorPatterns = [
+      'maximum number of pins',
+      'pin limit',
+      'reached the maximum',
+      'too many pins',
+      'pin quota',
+      'exceeded.*pin',
+      '429',
+    ];
+
+    return limitErrorPatterns.some(
+      (pattern) =>
+        errorMessage.toLowerCase().includes(pattern.toLowerCase()) ||
+        errorString.includes(pattern.toLowerCase()),
+    );
+  }
+
   async uploadFile(file: Express.Multer.File): Promise<string> {
     try {
       const readableStream = Readable.from(file.buffer);
@@ -43,6 +71,12 @@ export class PinataService {
       return result.IpfsHash;
     } catch (error) {
       this.logger.error('Pinata upload error:', error);
+
+      if (this.isPinataFileLimitError(error)) {
+        throw new BadRequestException(
+          'Pinata file limit reached. You have reached the maximum number of files (500) allowed on the free Pinata plan. Please upgrade your Pinata plan or remove some files to continue.',
+        );
+      }
 
       // Safe error message access
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
@@ -62,6 +96,12 @@ export class PinataService {
       return result.IpfsHash;
     } catch (error) {
       this.logger.error('Pinata metadata upload error:', error);
+
+      if (this.isPinataFileLimitError(error)) {
+        throw new BadRequestException(
+          'Pinata file limit reached. You have reached the maximum number of files (500) allowed on the free Pinata plan. Please upgrade your Pinata plan or remove some files to continue.',
+        );
+      }
 
       // Safe error message access
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
@@ -108,6 +148,14 @@ export class PinataService {
         json: 'application/json',
         txt: 'text/plain',
         csv: 'text/csv',
+
+        // Excel Files
+        xls: 'application/vnd.ms-excel',
+        xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+
+        // Presentation Files
+        ppt: 'application/vnd.ms-powerpoint',
+        pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
       };
 
       if (fileExtension && mimeTypeMap[fileExtension]) {
@@ -115,7 +163,7 @@ export class PinataService {
       } else {
         // Throw error for unsupported file types
         throw new InternalServerErrorException(
-          `Unsupported file type: ${fileExtension}. Only PDF, DOC, DOCX, JPG, PNG, JSON, TXT, CSV are allowed for property documents.`,
+          `Unsupported file type: ${fileExtension}. Only PDF, DOC, DOCX, JPG, PNG, JSON, TXT, CSV, XLS, XLSX, PPT, PPTX are allowed for property documents.`,
         );
       }
 
@@ -155,6 +203,10 @@ export class PinataService {
     } catch (error) {
       this.logger.error(`Failed to upload file from S3 URL ${s3Url}:`, error);
 
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
       throw new InternalServerErrorException(`Failed to upload file from S3 URL: ${errorMessage}`);
     }
@@ -192,7 +244,19 @@ export class PinataService {
       }
 
       // Validate file types from URLs before processing
-      const allowedExtensions = ['pdf', 'doc', 'docx', 'jpg', 'jpeg', 'png', 'json', 'txt', 'csv'];
+      const allowedExtensions = [
+        'pdf',
+        'doc',
+        'docx',
+        'jpg',
+        'jpeg',
+        'png',
+        'json',
+        'txt',
+        'csv',
+        'xls',
+        'xlsx',
+      ];
       const invalidFiles = uniqueUrls.filter((url) => {
         const urlParts = url.split('/');
         const fileName = urlParts[urlParts.length - 1].split('?')[0]; // Remove query params
@@ -202,7 +266,7 @@ export class PinataService {
 
       if (invalidFiles.length > 0) {
         throw new BadRequestException(
-          `Invalid file types detected. Only PDF, DOC, DOCX, JPG, PNG, JSON, TXT, CSV are allowed for property documents. Invalid files: ${invalidFiles.join(', ')}`,
+          `Invalid file types detected. Only PDF, DOC, DOCX, JPG, PNG, JSON, TXT, CSV, XLS, XLSX are allowed for property documents. Invalid files: ${invalidFiles.join(', ')}`,
         );
       }
 
@@ -215,6 +279,11 @@ export class PinataService {
               fullName: true,
             },
           },
+          types: {
+            select: {
+              type: true,
+            },
+          },
         },
       });
 
@@ -224,7 +293,12 @@ export class PinataService {
 
       const numericPropertyId = property.id;
       const propertyOwnerName = property.createdBy?.fullName || 'Unknown Owner';
-      const propertyType = property.type ? String(property.type) : '';
+      const propertyType =
+        property.types && property.types.length > 0
+          ? property.types.map((t) => t.type).join(', ')
+          : property.secondaryType
+            ? String(property.secondaryType)
+            : '';
       const propertyName = property.name ? String(property.name) : '';
 
       // Process unique S3 URLs in parallel with Promise.all
@@ -234,6 +308,10 @@ export class PinataService {
           const result = await this.uploadFileFromS3Url(s3Url);
           return result;
         } catch (error: unknown) {
+          if (error instanceof BadRequestException) {
+            throw error;
+          }
+
           const message = error instanceof Error ? error.message : 'Unknown error';
           this.logger.error(`Failed to upload file from S3 URL ${s3Url}: ${message}`);
           throw new InternalServerErrorException(`Failed to upload file from S3 URL: ${s3Url}`);
@@ -289,6 +367,10 @@ export class PinataService {
         })),
       };
     } catch (error: unknown) {
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+
       const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
       this.logger.error('Pinata upload failed:', errorMessage);
       throw new InternalServerErrorException(`Pinata upload failed: ${errorMessage}`);
