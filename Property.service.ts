@@ -10,14 +10,26 @@ import { plainToInstance } from 'class-transformer';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreatePropertyDto } from './dto/create-property.dto';
 import { PropertyResponseDto } from './dto/property-response.dto';
-import { PropertiesType, Role, Utilities, Prisma, PropertyStatus } from '@prisma/client';
+import {
+  PropertiesType,
+  Role,
+  RoleStatus,
+  Utilities,
+  Prisma,
+  PropertyStatus,
+  PropertyUser,
+  PropertyVisit,
+  PropertyEnquiry,
+  DealStructure,
+} from '@prisma/client';
 import { UpdateFoundationalDataDto } from './dto/update-foundational-data.dto';
 import { UpdateOtherInfoDto } from './dto/update-other-info.dto';
 import { UpdateUtilitiesAttachmentsDto } from './dto/update-utilities-attachments.dto';
 import { UpdateInvitationsDto } from './dto/update-invitations.dto';
 import { UpdateOverviewDto } from './dto/update-overview.dto';
 import { InvitationsService } from '../invitations/invitations.service';
-import type { Attachment, AuthedReq } from 'src/common/types';
+import type { Attachment, PropertyAttachment } from 'src/common/types';
+import { UserResponseDto } from '../users/dto/user-response.dto';
 import { S3Service } from '../file-upload/s3.service';
 import { BulkCreatePropertyDto } from './dto/bulk-create-property.dto';
 import { generatePropertyId } from 'src/common/helpers';
@@ -35,8 +47,32 @@ import {
 import { LambdaService } from '../lambda/lambda.service';
 import { EmailService } from '../email/email.service';
 import { EmailType } from '../email/types/email.types';
-import { BLOCKCHAIN } from 'src/common/constants';
+import {
+  BLOCKCHAIN,
+  PropertyEnquiryApplyTypeLabels,
+  PropertyEnquiryReasonTypeLables,
+  PropertyEnquiryTypeLabels,
+  PropertyTypeLabels,
+  PropertyUSerInviteStatusLabels,
+  UserRoleLabels,
+} from 'src/common/constants';
 import { BlockchainService } from '../blockchain/blockchain.service';
+import { CreatePropertyScanDto } from './dto/create-property-scan.dto';
+import { CreatePropertyEnquiryDto } from './dto/create-property-enquiry.dto';
+import { AuthService } from '../auth/auth.service';
+import { ConfigService } from '@nestjs/config';
+import { GetMapPropertiesQueryDto } from './dto/get-map-properties.dto';
+import { PropertyMapResponseDto } from './dto/map-response.dto';
+import { AllPropertiesResponseDto } from './dto/all-properties-response.dto';
+import dayjs from 'dayjs';
+import { ActivityEntryForReport, ActivityGroup, ActivityRow } from './types/property-type.enum';
+import { PropertyReportTemplates } from './propertyReportTemplates';
+import { getBrowser } from './puppeteer.manager';
+import { NotificationService } from '../notifications/notification.service';
+import { NotificationQueueService } from '../notifications/notification-queue.service';
+import { Tier } from '../auth/tiers';
+import { getRolesForTier } from '../auth/utils/tier.utils';
+import { PropertyAllUsersResponse } from './dto/property-all-users.response.dto';
 
 function isValidUtility(utility: string): utility is Utilities {
   return ['Power', 'Water', 'Gas', 'Internet', 'Parking', 'Safety'].includes(utility);
@@ -54,21 +90,21 @@ export class PropertyService {
     private readonly lambdaService: LambdaService,
     private readonly emailService: EmailService,
     private readonly blockchainService: BlockchainService,
+    private readonly authService: AuthService,
+    private readonly configService: ConfigService,
+    private readonly notificationService: NotificationService,
+    private readonly notificationQueueService: NotificationQueueService,
   ) {}
 
   async createPropertyAndInvite(
-    currentUser: AuthedReq['user'],
+    currentUser: UserResponseDto,
     createPropertyDto: CreatePropertyDto,
     documents?: Express.Multer.File[],
-  ): Promise<{ property: PropertyResponseDto; message: string }> {
+  ): Promise<{ message: string }> {
     const {
       propertyTypes,
       propertyName,
-      address,
-      city,
-      state,
-      zipCode,
-      country,
+      addressData,
       market,
       subMarket,
       secondaryType,
@@ -84,10 +120,10 @@ export class PropertyService {
     } = createPropertyDto;
 
     const propertyId = generatePropertyId(
-      country ?? 'US',
-      state ?? 'MA',
-      city ?? 'CAMB',
-      zipCode ?? '02139',
+      addressData.country ?? 'US',
+      addressData.state ?? 'MA',
+      addressData.city ?? 'CAMB',
+      addressData.zipCode ?? '02139',
     );
 
     // Upload documents
@@ -117,19 +153,26 @@ export class PropertyService {
       data: {
         propertyId,
         name: propertyName,
-        address,
-        city,
-        state,
-        zipCode,
-        country,
         market,
         subMarket,
         secondaryType,
         yearBuilt,
         createdById: currentUser.id,
         attachments: { create: attachmentsData },
+        completenessScore: 40,
         types: {
           createMany: { data: propertyTypesData },
+        },
+        propertyAddress: {
+          create: {
+            formatedAddress: addressData.address,
+            city: addressData.city,
+            state: addressData.state,
+            zipCode: addressData.zipCode,
+            country: addressData.country,
+            latitude: addressData.latitude,
+            longitude: addressData.longitude,
+          },
         },
         otherInfo: {
           create: {
@@ -149,7 +192,7 @@ export class PropertyService {
           },
         },
       },
-      include: { types: true, attachments: true, ownerInfo: true },
+      include: { types: true, attachments: true, ownerInfo: true, propertyAddress: true },
     });
 
     // After property is created, update PropertyOtherInfo with attachment IDs
@@ -195,7 +238,7 @@ export class PropertyService {
         market: property.market,
         createdBy: currentUser.id,
         createdAt: property.createdAt,
-        location: property.address ?? null,
+        location: property.propertyAddress?.formatedAddress ?? null,
         attachments: attachmentsData.map((attachment) => ({
           link: attachment.filePath,
           name: attachment.fileName,
@@ -214,14 +257,13 @@ export class PropertyService {
     }
 
     return {
-      property: plainToInstance(PropertyResponseDto, property, { excludeExtraneousValues: true }),
       message,
     };
   }
 
   async publishProperty(
     propertyRecordId: number,
-    currentUser: AuthedReq['user'],
+    currentUser: UserResponseDto,
   ): Promise<{ message: string }> {
     const property = await this.prisma.property.findUnique({
       where: { id: propertyRecordId },
@@ -308,16 +350,11 @@ export class PropertyService {
         this.logger.warn(`Wallet balance is zero: ${balanceEth} POL`);
         const errorMessage = `Insufficient balance in wallet. Current balance: ${balanceEth} POL. Please add funds to complete the transaction.`;
 
-        const propertyRecord = await this.prisma.property.findUnique({
-          where: { propertyId: property.propertyId },
-          select: { id: true },
-        });
-
-        if (propertyRecord) {
+        if (property) {
           await this.activityService.logActivity({
             action: ActivityActions.PROPERTY_PUBLISH_BALANCE_ERROR,
             entityType: ActivityEntityTypes.PROPERTY,
-            entityId: propertyRecord.id,
+            entityId: property.id,
             description: errorMessage,
             metadata: {
               propertyId: property.propertyId,
@@ -351,16 +388,11 @@ export class PropertyService {
           );
           const errorMessage = `Insufficient balance in wallet. Current balance: ${balanceEth} POL. Estimated transaction cost: ${estimatedCostEth} POL. Please add funds to complete the transaction.`;
 
-          const propertyRecord = await this.prisma.property.findUnique({
-            where: { propertyId: property.propertyId },
-            select: { id: true },
-          });
-
-          if (propertyRecord) {
+          if (property) {
             await this.activityService.logActivity({
               action: ActivityActions.PROPERTY_PUBLISH_BALANCE_ERROR,
               entityType: ActivityEntityTypes.PROPERTY,
-              entityId: propertyRecord.id,
+              entityId: property.id,
               description: errorMessage,
               metadata: {
                 propertyId: property.propertyId,
@@ -413,10 +445,10 @@ export class PropertyService {
   }
 
   async getProperties(
-    user: AuthedReq['user'],
+    user: UserResponseDto,
     query: GetPropertiesQueryDto,
   ): Promise<{
-    properties: PropertyResponseDto[];
+    properties: AllPropertiesResponseDto[];
     hasMore: boolean;
     nextCursor?: string;
   }> {
@@ -489,20 +521,20 @@ export class PropertyService {
       };
     }
 
-    // 🔍 Include relations
-    const propertyInclude = {
-      otherInfo: true,
-      attachments: true,
-      propertyUsers: {
-        select: { userRole: true, userRoleId: true },
-      },
-      ownerInfo: true,
-    };
-
-    // 🧾 Query
+    // Query
     const properties = await this.prisma.property.findMany({
       where: whereClause,
-      include: propertyInclude,
+      select: {
+        id: true,
+        propertyId: true,
+        name: true,
+        status: true,
+        updatedAt: true,
+        propertyAddress: { select: { formatedAddress: true } },
+        otherInfo: { select: { dealStructure: true, lastSale_or_rentPrice: true, imageIds: true } },
+        attachments: { select: { id: true, filePath: true } },
+        types: { select: { type: true } },
+      },
       orderBy: { id: 'desc' },
       take: limit + 1,
     });
@@ -515,22 +547,30 @@ export class PropertyService {
         ? resultProperties[resultProperties.length - 1].id.toString()
         : undefined;
 
-    // 🧮 Transform numeric fields
-    const transformedProperties = resultProperties.map((property) => ({
-      ...property,
-      otherInfo: property.otherInfo
-        ? {
-            ...property.otherInfo,
-            landSize: property.otherInfo.landSize ? Number(property.otherInfo.landSize) : 0,
-            grossBuildingArea: property.otherInfo.grossBuildingArea
-              ? Number(property.otherInfo.grossBuildingArea)
-              : 0,
-          }
-        : null,
-    }));
+    // 🧮 Transform and flatten response structure
+    const transformedProperties = resultProperties.map((property) => {
+      // Filter attachments by imageIds from otherInfo
+      const imageIds = property.otherInfo?.imageIds || [];
+      const filteredAttachments = property.attachments.filter((attachment) =>
+        imageIds.includes(attachment.id),
+      );
+
+      return {
+        id: property.id,
+        propertyId: property.propertyId,
+        name: property.name,
+        address: property.propertyAddress?.formatedAddress ?? '',
+        status: property.status,
+        updatedAt: property.updatedAt,
+        type: property.types.map((t) => t.type),
+        dealStructure: property.otherInfo?.dealStructure ?? null,
+        lastSale_or_rentPrice: property.otherInfo?.lastSale_or_rentPrice ?? '',
+        attachments: filteredAttachments.map((attachment) => attachment.filePath),
+      };
+    });
 
     return {
-      properties: plainToInstance(PropertyResponseDto, transformedProperties, {
+      properties: plainToInstance(AllPropertiesResponseDto, transformedProperties, {
         excludeExtraneousValues: true,
       }),
       hasMore,
@@ -538,12 +578,274 @@ export class PropertyService {
     };
   }
 
+  async getListProperties(
+    user: UserResponseDto,
+    query: GetPropertiesQueryDto,
+  ): Promise<{
+    properties: AllPropertiesResponseDto[];
+    total: number;
+    offset: number;
+    limit: number;
+    hasMore: boolean;
+  }> {
+    const { id: userId, selectedRole } = user;
+    const {
+      offset = 0,
+      limit = 9,
+      status = [],
+      types = [],
+      market,
+      subMarket,
+      dateFrom,
+      dateTo,
+    } = query;
+
+    // Ensure offset and limit are valid numbers
+    const validOffset = Number.isFinite(offset) && offset >= 0 ? offset : 0;
+    const validLimit = Number.isFinite(limit) && limit > 0 ? limit : 9;
+
+    // 🧱 Build where clause dynamically
+    const whereClause: any = {};
+
+    if (status.length > 0) {
+      whereClause.status = { in: status };
+    }
+
+    if (types.length > 0) {
+      const validTypes = types
+        .map((t) => t.toUpperCase())
+        .filter((t): t is keyof typeof PropertiesType => t in PropertiesType)
+        .map((t) => PropertiesType[t]);
+
+      if (validTypes.length > 0) {
+        whereClause.types = {
+          some: {
+            type: { in: validTypes },
+          },
+        };
+      }
+    }
+
+    if (market) {
+      whereClause.market = { contains: market, mode: 'insensitive' };
+    }
+
+    if (subMarket) {
+      whereClause.subMarket = { contains: subMarket, mode: 'insensitive' };
+    }
+
+    if (dateFrom || dateTo) {
+      whereClause.createdAt = {};
+      if (dateFrom) {
+        whereClause.createdAt.gte = new Date(dateFrom);
+      }
+      if (dateTo) {
+        whereClause.createdAt.lte = new Date(dateTo);
+      }
+    }
+
+    // 🔒 Restrict non-admin users
+    if (selectedRole !== Role.SUPER_ADMIN && selectedRole !== Role.ADMIN) {
+      whereClause.propertyUsers = {
+        some: {
+          userId,
+          userRole: { role: { equals: selectedRole } },
+        },
+      };
+    }
+
+    // Query
+    const [properties, total] = await Promise.all([
+      this.prisma.property.findMany({
+        where: whereClause,
+        select: {
+          id: true,
+          propertyId: true,
+          name: true,
+          status: true,
+          updatedAt: true,
+          createdAt: true,
+          yearBuilt: true,
+          market: true,
+          subMarket: true,
+          propertyAddress: { select: { formatedAddress: true } },
+          otherInfo: {
+            select: { dealStructure: true, lastSale_or_rentPrice: true, imageIds: true },
+          },
+          attachments: { select: { id: true, filePath: true } },
+          types: { select: { type: true } },
+        },
+        orderBy: { id: 'desc' },
+        skip: validOffset,
+        take: validLimit,
+      }),
+      this.prisma.property.count({ where: whereClause }),
+    ]);
+
+    const hasMore = validOffset + properties.length < total;
+
+    // 🧮 Transform and flatten response structure
+    const transformedProperties = properties.map((property) => {
+      // Filter attachments by imageIds from otherInfo
+      const imageIds = property.otherInfo?.imageIds || [];
+      const filteredAttachments = property.attachments.filter((attachment) =>
+        imageIds.includes(attachment.id),
+      );
+
+      return {
+        id: property.id,
+        propertyId: property.propertyId,
+        name: property.name,
+        address: property.propertyAddress?.formatedAddress ?? '',
+        status: property.status,
+        updatedAt: property.updatedAt,
+        createdAt: property.createdAt,
+        type: property.types.map((t) => t.type),
+        dealStructure: property.otherInfo?.dealStructure ?? null,
+        lastSale_or_rentPrice: property.otherInfo?.lastSale_or_rentPrice ?? '',
+        attachments: filteredAttachments.map((attachment) => attachment.filePath),
+        yearBuilt: property.yearBuilt,
+        market: property.market,
+        subMarket: property.subMarket,
+      };
+    });
+
+    return {
+      properties: plainToInstance(AllPropertiesResponseDto, transformedProperties, {
+        excludeExtraneousValues: true,
+      }),
+      total,
+      offset: validOffset,
+      limit: validLimit,
+      hasMore,
+    };
+  }
+
+  async getMapProperties(query: GetMapPropertiesQueryDto): Promise<{
+    properties: PropertyMapResponseDto[];
+  }> {
+    const { status = [], types = [], market, subMarket, minLat, maxLat, minLng, maxLng } = query;
+
+    // 🧱 Build where clause dynamically
+    const whereClause: any = {
+      propertyAddress: {
+        isNot: null,
+      },
+    };
+
+    // Filter by status
+    if (status.length > 0) {
+      whereClause.status = { in: status };
+    }
+
+    // Filter by property types
+    if (types.length > 0) {
+      const validTypes = types
+        .map((t) => t.toUpperCase())
+        .filter((t): t is keyof typeof PropertiesType => t in PropertiesType)
+        .map((t) => PropertiesType[t]);
+
+      if (validTypes.length > 0) {
+        whereClause.types = {
+          some: {
+            type: { in: validTypes },
+          },
+        };
+      }
+    }
+
+    // Filter by market
+    if (market) {
+      whereClause.market = { contains: market, mode: 'insensitive' };
+    }
+
+    // Filter by sub-market
+    if (subMarket) {
+      whereClause.subMarket = { contains: subMarket, mode: 'insensitive' };
+    }
+
+    // Filter by map bounds (latitude and longitude)
+    if (
+      minLat !== undefined ||
+      maxLat !== undefined ||
+      minLng !== undefined ||
+      maxLng !== undefined
+    ) {
+      const locationFilter: any = {};
+
+      if (minLat !== undefined && maxLat !== undefined) {
+        locationFilter.latitude = { gte: minLat, lte: maxLat };
+      } else if (minLat !== undefined) {
+        locationFilter.latitude = { gte: minLat };
+      } else if (maxLat !== undefined) {
+        locationFilter.latitude = { lte: maxLat };
+      }
+
+      if (minLng !== undefined && maxLng !== undefined) {
+        locationFilter.longitude = { gte: minLng, lte: maxLng };
+      } else if (minLng !== undefined) {
+        locationFilter.longitude = { gte: minLng };
+      } else if (maxLng !== undefined) {
+        locationFilter.longitude = { lte: maxLng };
+      }
+
+      // Apply location filter to propertyAddress relation using 'is'
+      if (Object.keys(locationFilter as Record<string, unknown>).length > 0) {
+        whereClause.propertyAddress = {
+          is: {
+            ...locationFilter,
+          },
+        };
+      }
+    }
+
+    // 🔍 Query properties with minimal fields for map display
+    const properties = await this.prisma.property.findMany({
+      where: whereClause,
+      select: {
+        id: true,
+        name: true,
+        propertyAddress: {
+          select: {
+            formatedAddress: true,
+            latitude: true,
+            longitude: true,
+          },
+        },
+        attachments: true,
+      },
+    });
+
+    // 🧮 Transform numeric fields and format response
+    const transformedProperties = properties.map((property) => ({
+      id: property.id,
+      name: property.name,
+      propertyAddress: property.propertyAddress
+        ? {
+            address: property.propertyAddress.formatedAddress,
+            latitude: property.propertyAddress.latitude
+              ? Number(property.propertyAddress.latitude)
+              : null,
+            longitude: property.propertyAddress.longitude
+              ? Number(property.propertyAddress.longitude)
+              : null,
+          }
+        : undefined,
+      attachments: property.attachments || [],
+    }));
+
+    return {
+      properties: plainToInstance(PropertyMapResponseDto, transformedProperties, {
+        excludeExtraneousValues: true,
+      }),
+    };
+  }
+
   async getPropertyById(
     propertyRecordId: number,
-    user: AuthedReq['user'],
+    user: UserResponseDto,
   ): Promise<PropertyResponseDto> {
     const { id: userId, selectedRole } = user;
-
     // Enhanced include for all step-wise data
     const propertyInclude = {
       propertyUsers: {
@@ -557,9 +859,13 @@ export class PropertyService {
       propertyUtilities: true, // PropertyUtilities
       attachments: true, // Attachments
       ownerInfo: true, // PropertyOwnerInfo
+      propertyAddress: true, // PropertyAddress
       inviteRoles: {
         where: {
           propertyId: propertyRecordId,
+          NOT: {
+            userInvite: { email: user?.email },
+          },
         },
         select: {
           id: true,
@@ -615,6 +921,102 @@ export class PropertyService {
       grossArea: property.grossArea ? Number(property.grossArea) : 0,
     };
 
+    if (property.propertyAddress) {
+      transformedProperty.propertyAddress = {
+        ...property.propertyAddress,
+        latitude: property.propertyAddress.latitude
+          ? Number(property.propertyAddress.latitude)
+          : null,
+        longitude: property.propertyAddress.longitude
+          ? Number(property.propertyAddress.longitude)
+          : null,
+      };
+    }
+
+    if (property.otherInfo) {
+      transformedProperty.otherInfo = {
+        ...property.otherInfo,
+        landSize: property.otherInfo.landSize ? Number(property.otherInfo.landSize) : 0,
+        grossBuildingArea: property.otherInfo.grossBuildingArea
+          ? Number(property.otherInfo.grossBuildingArea)
+          : 0,
+        lastSale_or_rentPrice: property.otherInfo.lastSale_or_rentPrice ?? '',
+      };
+    } else {
+      transformedProperty.otherInfo = null;
+    }
+
+    // Parse utilities from JSON string in PropertyOtherInfo
+
+    transformedProperty.propertyUtilities = property.otherInfo?.utilities
+      ? JSON.parse(String(property.otherInfo.utilities))
+      : [];
+
+    return transformedProperty as PropertyResponseDto;
+  }
+
+  async verifyCurrentUserIsPropertyUser(
+    propertyId: string,
+    user: UserResponseDto,
+  ): Promise<PropertyUser | null> {
+    if (user) {
+      const property = await this.prisma.property.findUnique({ where: { propertyId } });
+      if (property) {
+        const propertyUser = await this.prisma.propertyUser.findFirst({
+          where: {
+            AND: [{ userId: user.id }, { propertyId: property.id }],
+          },
+        });
+
+        return propertyUser;
+      }
+    }
+
+    return null;
+  }
+
+  async getPropertyPublicDetails(propertyPublicId: string): Promise<PropertyResponseDto> {
+    const propertyInclude = {
+      types: true,
+      otherInfo: true,
+      propertyUtilities: true,
+      attachments: true,
+      ownerInfo: true,
+      propertyAddress: true,
+    };
+
+    // Super admin can access any property
+    const property = await this.prisma.property.findUnique({
+      where: { propertyId: propertyPublicId },
+      include: propertyInclude,
+    });
+
+    if (!property) {
+      throw new NotFoundException('Property not found or access denied');
+    }
+
+    const transformedProperty: any = {
+      ...property,
+
+      area: property.otherInfo?.landSize ? Number(property.otherInfo?.landSize) : 0,
+
+      grossArea: property.otherInfo?.grossBuildingArea
+        ? Number(property.otherInfo.grossBuildingArea)
+        : 0,
+    };
+
+    if (property.propertyAddress) {
+      transformedProperty.propertyAddress = {
+        ...property.propertyAddress,
+        latitude: property.propertyAddress.latitude
+          ? Number(property.propertyAddress.latitude)
+          : null,
+        longitude: property.propertyAddress.longitude
+          ? Number(property.propertyAddress.longitude)
+          : null,
+      };
+    }
+
     if (property.otherInfo) {
       transformedProperty.otherInfo = {
         ...property.otherInfo,
@@ -638,8 +1040,118 @@ export class PropertyService {
     return transformedProperty as PropertyResponseDto;
   }
 
+  async logPropertyVisit(data: CreatePropertyScanDto): Promise<PropertyVisit> {
+    const { propertyId, userAgent, userToken, source, timestamp, ip } = data;
+
+    return this.prisma.$transaction(async (tx) => {
+      // Fetch property — fail early if not found
+      const property = await tx.property.findUnique({
+        where: { propertyId },
+        select: { id: true },
+      });
+
+      if (!property) {
+        throw new Error(`Property not found: ${propertyId}`);
+      }
+
+      const userEmail = userToken
+        ? this.authService.decodeToken(userToken)?.decodedEmail
+        : undefined;
+      let user;
+      if (userEmail) user = await tx.user.findUnique({ where: { email: userEmail } });
+      // Log activity
+      await tx.activityLog.create({
+        data: {
+          action: ActivityActions.PROPERTY_VISITED_BY_USER,
+          entityId: property.id,
+          entityType: ActivityEntityTypes.PROPERTY,
+          description: `${user ? user.fullName : 'Someone'} scanned property QR code.`,
+          metadata: {
+            user: user ?? undefined,
+            propertyId: property.id,
+          },
+        },
+      });
+      // Log visit
+      return tx.propertyVisit.create({
+        data: {
+          propertyId,
+          userToken: userToken ?? null,
+          ip,
+          source,
+          userAgent,
+          timestamp: timestamp ? new Date(timestamp) : new Date(),
+        },
+      });
+    });
+  }
+
+  async createPropertyEnquiry(
+    propertyId: string,
+    data: CreatePropertyEnquiryDto,
+  ): Promise<PropertyEnquiry> {
+    const result = await this.prisma.$transaction(async (tx) => {
+      const property = await tx.property.findUnique({
+        where: { propertyId },
+        include: { ownerInfo: true },
+      });
+
+      const enquiry = await tx.propertyEnquiry.create({
+        data: {
+          propertyId,
+          fullName: data.fullName,
+          email: data.email,
+          phone: data.phone ?? null,
+          message: data?.message ?? '',
+          applyTypes: data.applyTypes,
+          enquiryTypes: data.enquiryTypes,
+          enquiryReason: data.enquiryReason,
+        },
+        include: { property: true },
+      });
+
+      return { property, enquiry };
+    });
+
+    const { property, enquiry } = result;
+
+    // Email sending must be OUTSIDE the transaction
+    if (property?.ownerInfo) {
+      const propertyUrl = `${this.configService.get<string>('WEBSITE_URL')}/properties/${property.id}`;
+
+      await this.emailService.sendEmail(EmailType.PROPERTY_ENQUIRY, {
+        recipientEmail: property.ownerInfo.email,
+        propertyOwnerName: property.ownerInfo.name,
+        propertyName: property.name ?? '',
+        enquirerName: data.fullName,
+        enquirerEmail: data.email,
+        enquirerPhone: data.phone ?? undefined,
+        enquiryMessage: data?.message ?? '',
+        applyTypes: data.applyTypes.map((type) => PropertyEnquiryApplyTypeLabels[type] || ''),
+        enquiryTypes: data.enquiryTypes.map(
+          (enquireType) => PropertyEnquiryTypeLabels[enquireType] || '',
+        ),
+        enquiryReason: PropertyEnquiryReasonTypeLables[data.enquiryReason] ?? '',
+        propertyUrl,
+        createdAt: enquiry.createdAt.toString(),
+      });
+    }
+    await this.activityService.logActivity({
+      action: ActivityActions.PROPERTY_ENQUIRY,
+      entityId: property?.id,
+      entityType: ActivityEntityTypes.PROPERTY,
+      description: `You have an enquiry form ${data.fullName} on property`,
+      metadata: {
+        propertyId: property?.id,
+        enquiry: enquiry,
+      },
+    });
+
+    return enquiry;
+  }
+
   async bulkCreateProperties(
-    user: AuthedReq['user'],
+    user: UserResponseDto,
     dto: BulkCreatePropertyDto,
   ): Promise<{ count: number; message: string }> {
     const { properties } = dto;
@@ -664,7 +1176,7 @@ export class PropertyService {
 
     try {
       return await this.prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-        // 2️⃣ Insert properties
+        // 2️⃣ Insert properties (exclude address fields as they go to propertyAddress table)
         await tx.property.createMany({
           data: propertiesWithGeneratedIds.map(
             ({
@@ -680,6 +1192,16 @@ export class PropertyService {
               ownerName,
               // eslint-disable-next-line @typescript-eslint/no-unused-vars
               ownerPhoneNumber,
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
+              address,
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
+              city,
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
+              state,
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
+              country,
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
+              zipCode,
               ...rest
             }) => rest,
           ),
@@ -695,9 +1217,10 @@ export class PropertyService {
           select: { id: true, propertyId: true },
         });
 
-        // 4️⃣ Prepare data for `PropertyTypeOnProperty` join table and `PropertyOwnerInfo`
+        // 4️⃣ Prepare data for `PropertyTypeOnProperty`, `PropertyOwnerInfo`, and `PropertyAddress`
         const propertyTypes: Prisma.PropertyTypeOnPropertyCreateManyInput[] = [];
         const ownerInfos: Prisma.PropertyOwnerInfoCreateManyInput[] = [];
+        const propertyAddresses: Prisma.PropertyAddressCreateManyInput[] = [];
 
         for (const { id, propertyId } of fetchedProperties) {
           const propertyData = propertiesWithGeneratedIds.find((p) => p.propertyId === propertyId);
@@ -722,6 +1245,16 @@ export class PropertyService {
             email: propertyData.ownerEmail,
             company: propertyData.ownerCompany,
           });
+
+          // Add property address information
+          propertyAddresses.push({
+            propertyRecordId: id,
+            formatedAddress: propertyData.address || '',
+            city: propertyData.city || '',
+            state: propertyData.state || '',
+            country: propertyData.country || '',
+            zipCode: propertyData.zipCode || '',
+          });
         }
 
         // 5️⃣ Insert property types (join table)
@@ -740,7 +1273,15 @@ export class PropertyService {
           });
         }
 
-        // 7️⃣ Return structured response
+        // 7️⃣ Insert property addresses
+        if (propertyAddresses.length > 0) {
+          await tx.propertyAddress.createMany({
+            data: propertyAddresses,
+            skipDuplicates: true,
+          });
+        }
+
+        // 8️⃣ Return structured response
         return {
           count: properties.length,
           message: `${properties.length} properties successfully created with types.`,
@@ -758,14 +1299,14 @@ export class PropertyService {
   async updateFoundationalData(
     propertyRecordId: number,
     updateData: UpdateFoundationalDataDto,
-    currentUser: AuthedReq['user'],
+    currentUser: UserResponseDto,
   ): Promise<void> {
     // Check if property exists and user has permission
     await this.checkPropertyPermission(propertyRecordId, currentUser);
 
     const {
       propertyName,
-      address,
+      addressData,
       secondaryType,
       isResidential,
       isCommercial,
@@ -785,10 +1326,6 @@ export class PropertyService {
       ownerCompany,
       market,
       subMarket,
-      city,
-      state,
-      zipCode,
-      country,
     } = updateData;
 
     // Validate at least one property type is selected
@@ -813,16 +1350,35 @@ export class PropertyService {
       where: { id: propertyRecordId },
       data: {
         name: propertyName,
-        address,
         secondaryType,
         buildingClass,
         occupancyType,
         market,
         subMarket,
-        city,
-        state,
-        zipCode,
-        country,
+      },
+    });
+
+    // Update or create property address
+    await this.prisma.propertyAddress.upsert({
+      where: { propertyRecordId: propertyRecordId },
+      update: {
+        formatedAddress: addressData.address || '',
+        city: addressData.city || '',
+        state: addressData.state || '',
+        zipCode: addressData.zipCode || '',
+        country: addressData.country || '',
+        latitude: addressData.latitude,
+        longitude: addressData.longitude,
+      },
+      create: {
+        propertyRecordId: propertyRecordId,
+        formatedAddress: addressData.address || '',
+        city: addressData.city || '',
+        state: addressData.state || '',
+        zipCode: addressData.zipCode || '',
+        country: addressData.country || '',
+        latitude: addressData.latitude,
+        longitude: addressData.longitude,
       },
     });
 
@@ -881,15 +1437,15 @@ export class PropertyService {
       create: {
         propertyRecordId: propertyRecordId,
         smartTagId: '', // Default value, will be updated in step 2
-        dealStructure: 'For_Sale', // Default value
+        dealStructure: DealStructure.For_Sale, // Default value
         landSize: 0,
         grossBuildingArea: 0,
         use: 'Current', // Default value
         parcelId_or_apn: 0,
-        safety: new Date(),
+        safety: null,
         leaseStatus: 'Active', // Default value
-        legalPropertyAddress: address,
-        lastSaleDate: new Date(),
+        legalPropertyAddress: '',
+        lastSaleDate: null,
         lastSale_or_rentPrice: '',
         blockChain_and_tokenization: 'TEXT_1', // Default value
         propertyDescription: '',
@@ -910,7 +1466,7 @@ export class PropertyService {
   async updateOtherInfo(
     propertyRecordId: number,
     updateData: UpdateOtherInfoDto,
-    currentUser: AuthedReq['user'],
+    currentUser: UserResponseDto,
   ): Promise<void> {
     await this.checkPropertyPermission(propertyRecordId, currentUser);
 
@@ -932,11 +1488,13 @@ export class PropertyService {
       documents,
     } = updateData;
 
+    const score = await this.getUpdatedCompletenessScore(propertyRecordId, 60);
     // Update property basic info
     await this.prisma.property.update({
       where: { id: propertyRecordId },
       data: {
         yearBuilt,
+        completenessScore: score,
       },
     });
 
@@ -1039,7 +1597,7 @@ export class PropertyService {
   async updateUtilitiesAttachments(
     propertyRecordId: number,
     updateData: UpdateUtilitiesAttachmentsDto,
-    currentUser: AuthedReq['user'],
+    currentUser: UserResponseDto,
   ): Promise<void> {
     await this.checkPropertyPermission(propertyRecordId, currentUser);
 
@@ -1056,7 +1614,14 @@ export class PropertyService {
 
       // Store utilities as JSON in PropertyOtherInfo
       const utilitiesJson = JSON.stringify(utilities);
+      const score = await this.getUpdatedCompletenessScore(propertyRecordId, 80);
 
+      await this.prisma.property.update({
+        where: { id: propertyRecordId },
+        data: {
+          completenessScore: score,
+        },
+      });
       // Update or create PropertyOtherInfo with utilities
       await this.prisma.propertyOtherInfo.upsert({
         where: { propertyRecordId: propertyRecordId },
@@ -1147,7 +1712,7 @@ export class PropertyService {
   async updateInvitations(
     propertyId: number,
     updateData: UpdateInvitationsDto,
-    currentUser: AuthedReq['user'],
+    currentUser: UserResponseDto,
   ): Promise<void> {
     await this.checkPropertyPermission(propertyId, currentUser);
 
@@ -1166,7 +1731,14 @@ export class PropertyService {
     if (!property.propertyId) {
       throw new BadRequestException('Property business ID is missing');
     }
+    const score = await this.getUpdatedCompletenessScore(propertyId, 100);
 
+    await this.prisma.property.update({
+      where: { id: propertyId },
+      data: {
+        completenessScore: score,
+      },
+    });
     // Send invites
     if (invites && invites.length > 0) {
       try {
@@ -1202,7 +1774,7 @@ export class PropertyService {
 
   private async checkPropertyPermission(
     propertyId: number,
-    currentUser: AuthedReq['user'],
+    currentUser: UserResponseDto,
   ): Promise<void> {
     // Check if property exists
     const property = await this.prisma.property.findUnique({
@@ -1232,12 +1804,11 @@ export class PropertyService {
   async deleteAttachment(
     propertyRecordId: number,
     attachmentId: number,
-    currentUser: AuthedReq['user'],
+    currentUser: UserResponseDto,
+    isPropertyPhoto: boolean,
   ): Promise<void> {
-    // Check property permission first
     await this.checkPropertyPermission(propertyRecordId, currentUser);
 
-    // Find the attachment
     const attachment = await this.prisma.attachment.findFirst({
       where: {
         id: attachmentId,
@@ -1249,59 +1820,55 @@ export class PropertyService {
       throw new NotFoundException('Attachment not found');
     }
 
+    // 🔹 Best-effort S3 deletion (outside transaction)
     try {
-      // Delete from S3 first
       await this.s3Service.deleteFile(attachment.filePath);
     } catch (error) {
       this.logger.warn(`Failed to delete file from S3: ${attachment.filePath}`, error);
-      // Continue with database deletion even if S3 deletion fails
     }
 
-    // Delete from database
-    await this.prisma.attachment.delete({
-      where: {
-        id: attachmentId,
-      },
+    // 🔹 Single DB transaction
+    await this.prisma.$transaction(async (tx) => {
+      // Delete attachment record
+      await tx.attachment.delete({
+        where: { id: attachmentId },
+      });
+
+      const propertyOtherInfo = await tx.propertyOtherInfo.findUnique({
+        where: { propertyRecordId },
+        select: {
+          attachmentIds: true,
+          imageIds: true,
+        },
+      });
+
+      if (!propertyOtherInfo) return;
+
+      const data: any = {
+        attachmentIds: propertyOtherInfo.attachmentIds.filter((id) => id !== attachmentId),
+      };
+
+      if (isPropertyPhoto) {
+        data.imageIds = propertyOtherInfo.imageIds.filter((id) => id !== attachmentId);
+      }
+
+      await tx.propertyOtherInfo.update({
+        where: { propertyRecordId },
+        data,
+      });
     });
 
-    const propertyOtherInfo = await this.prisma.propertyOtherInfo.findUnique({
-      where: { propertyRecordId },
-    });
-
-    if (propertyOtherInfo) {
-      const isImage = attachment.fileType.startsWith('image/');
-      const updateData: { attachmentIds?: number[]; imageIds?: number[] } = {};
-
-      if (Array.isArray(propertyOtherInfo.attachmentIds)) {
-        const attachmentIds: number[] = propertyOtherInfo.attachmentIds;
-        const updatedAttachmentIds = attachmentIds.filter((id) => id !== attachmentId);
-        updateData.attachmentIds = updatedAttachmentIds;
-      }
-
-      if (isImage && Array.isArray(propertyOtherInfo.imageIds)) {
-        const imageIds: number[] = propertyOtherInfo.imageIds;
-        const updatedImageIds = imageIds.filter((id) => id !== attachmentId);
-        updateData.imageIds = updatedImageIds;
-      }
-
-      if (Object.keys(updateData).length > 0) {
-        await this.prisma.propertyOtherInfo.update({
-          where: { propertyRecordId },
-          data: updateData,
-        });
-      }
-    }
-
+    // 🔹 Activity log (outside transaction)
     await this.activityService.logActivity({
       action: ActivityActions.PROPERTY_REMOVE_ATTACHMENT,
-      entityId: propertyRecordId ?? undefined,
+      entityId: propertyRecordId,
       entityType: ActivityEntityTypes.PROPERTY,
-      description: `Remove document form property.`,
+      description: 'Remove document from property.',
       metadata: {
+        id: attachment.id,
         name: attachment.fileName,
         propertyId: propertyRecordId,
         url: attachment.filePath,
-        id: attachment.id,
       },
     });
 
@@ -1313,13 +1880,13 @@ export class PropertyService {
   async updateOverview(
     propertyId: number,
     updateData: UpdateOverviewDto,
-    currentUser: AuthedReq['user'],
+    currentUser: UserResponseDto,
   ): Promise<void> {
     await this.checkPropertyPermission(propertyId, currentUser);
 
     const {
       propertyName,
-      address,
+      addressData,
       secondaryType,
       isResidential,
       isCommercial,
@@ -1335,10 +1902,6 @@ export class PropertyService {
       occupancyType,
       market,
       subMarket,
-      city,
-      state,
-      zipCode,
-      country,
       smartTagId,
       landSqFt,
       use,
@@ -1362,17 +1925,36 @@ export class PropertyService {
         where: { id: propertyId },
         data: {
           name: propertyName,
-          address,
           secondaryType,
           buildingClass,
           occupancyType,
           market,
           subMarket,
-          city,
-          state,
-          zipCode,
-          country,
           yearBuilt,
+        },
+      });
+
+      // Update or create property address
+      await tx.propertyAddress.upsert({
+        where: { propertyRecordId: propertyId },
+        update: {
+          formatedAddress: addressData.address || '',
+          city: addressData.city || '',
+          state: addressData.state || '',
+          zipCode: addressData.zipCode || '',
+          country: addressData.country || '',
+          latitude: addressData.latitude,
+          longitude: addressData.longitude,
+        },
+        create: {
+          propertyRecordId: propertyId,
+          formatedAddress: addressData.address || '',
+          city: addressData.city || '',
+          state: addressData.state || '',
+          zipCode: addressData.zipCode || '',
+          country: addressData.country || '',
+          latitude: addressData.latitude,
+          longitude: addressData.longitude,
         },
       });
 
@@ -1452,7 +2034,7 @@ export class PropertyService {
    */
   async syncPropertyToBlockchain(
     propertyRecordId: number,
-    currentUser: AuthedReq['user'],
+    currentUser: UserResponseDto,
   ): Promise<{ message: string }> {
     const [property, userDetails] = await Promise.all([
       this.prisma.property.findUnique({
@@ -1535,17 +2117,11 @@ export class PropertyService {
       if (balanceWei === 0) {
         this.logger.warn(`Wallet balance is zero: ${balanceEth} POL`);
         const errorMessage = `Insufficient balance in wallet. Current balance: ${balanceEth} POL. Please add funds to complete the transaction.`;
-
-        const propertyRecord = await this.prisma.property.findUnique({
-          where: { propertyId: property.propertyId },
-          select: { id: true },
-        });
-
-        if (propertyRecord) {
+        if (property) {
           await this.activityService.logActivity({
             action: ActivityActions.PROPERTY_SYNC_BALANCE_ERROR,
             entityType: ActivityEntityTypes.PROPERTY,
-            entityId: propertyRecord.id,
+            entityId: property.id,
             description: errorMessage,
             metadata: {
               propertyId: property.propertyId,
@@ -1558,46 +2134,24 @@ export class PropertyService {
         throw new BadRequestException(errorMessage);
       }
 
-      const dummyCID = 'QmYjtig7VJQ6XsnUjqqJvj7QaMcCAwtrgNdahSiFofrE7o';
-      const dummyTokenId = 1;
+      const minimumBalanceWei = BigInt(Math.floor(0.005 * 1e18));
+      const balanceWeiBigInt = BigInt(Math.floor(balanceWei * 1e18));
 
-      this.logger.log(
-        `Estimating gas cost for update with dummy CID: ${dummyCID} and dummy tokenId: ${dummyTokenId}`,
-      );
-
-      const estimate = await this.blockchainService.estimateUpdatePropertyCost(
-        dummyTokenId,
-        dummyCID,
-      );
-      const estimatedCostWei = estimate.totalCostWei;
-      this.logger.log(
-        `Estimated gas cost for update: ${estimate.totalCostEth} POL (${estimatedCostWei.toString()} wei)`,
-      );
-
-      // Compare balance with estimated cost
-      const balanceWeiBigInt = BigInt(Math.floor(balanceWei * 1e18)); // Convert POL to wei
-      if (balanceWeiBigInt < estimatedCostWei) {
-        const estimatedCostEth = (Number(estimatedCostWei) / 1e18).toFixed(6);
+      if (balanceWeiBigInt < minimumBalanceWei) {
         this.logger.warn(
-          `Insufficient balance: ${balanceEth} POL < estimated cost: ${estimatedCostEth} POL`,
+          `Wallet balance below minimum threshold: ${balanceEth} POL < 0.005 POL required`,
         );
-        const errorMessage = `Insufficient balance in wallet. Current balance: ${balanceEth} POL. Estimated transaction cost: ${estimatedCostEth} POL. Please add funds to complete the transaction.`;
-
-        const propertyRecord = await this.prisma.property.findUnique({
-          where: { propertyId: property.propertyId },
-          select: { id: true },
-        });
-
-        if (propertyRecord) {
+        const errorMessage = `Insufficient balance in wallet. Current balance: ${balanceEth} POL. Minimum required: 0.005 POL. Please add funds to complete the transaction.`;
+        if (property) {
           await this.activityService.logActivity({
             action: ActivityActions.PROPERTY_SYNC_BALANCE_ERROR,
             entityType: ActivityEntityTypes.PROPERTY,
-            entityId: propertyRecord.id,
+            entityId: property.id,
             description: errorMessage,
             metadata: {
               propertyId: property.propertyId,
               balance: balanceEth,
-              estimatedCost: estimatedCostEth,
+              minimumRequired: '0.005',
               errorType: 'insufficient_balance',
             },
           });
@@ -1607,7 +2161,7 @@ export class PropertyService {
       }
 
       this.logger.log(
-        `Wallet balance check passed: ${balanceEth} POL (sufficient for transaction)`,
+        `Wallet balance check passed: ${balanceEth} POL (above minimum threshold of 0.005 POL).`,
       );
     } catch (error) {
       if (error instanceof BadRequestException) {
@@ -1676,7 +2230,7 @@ export class PropertyService {
       // IDEMPOTENCY CHECK: Skip if property already has tokenId (already processed)
       const existingProperty = await this.prisma.property.findUnique({
         where: { propertyId },
-        select: { tokenId: true, status: true },
+        select: { tokenId: true, status: true, id: true, createdById: true, name: true },
       });
 
       if (existingProperty?.tokenId && action === 'register') {
@@ -1725,7 +2279,7 @@ export class PropertyService {
 
       this.logger.log(`Updating property ${propertyId} in database with blockchain data...`);
 
-      await this.prisma.property.update({
+      const updatedProperty = await this.prisma.property.update({
         where: { propertyId: propertyId },
         data: {
           tokenId: result.data.tokenId,
@@ -1733,22 +2287,62 @@ export class PropertyService {
           documentsCID: result.data.metadataCID,
           status: PropertyStatus.APPROVED,
         },
+        select: { id: true, createdById: true, name: true },
       });
 
-      const propertyRecord = await this.prisma.property.findUnique({
-        where: { propertyId },
-        select: { id: true },
-      });
-
-      if (!propertyRecord) {
+      if (!existingProperty) {
         this.logger.error(`Property record not found for propertyId: ${propertyId}`);
         throw new Error(`Property record not found for propertyId: ${propertyId}`);
+      }
+
+      // Send notification when property is approved (only for 'register' action)
+      if (action === 'register') {
+        try {
+          // Tier 1 roles (SUPER_ADMIN, ADMIN, OWNER, PROPERTY_OWNER)
+          const tier1Roles = getRolesForTier(Tier.TIER1);
+          const tier1Users = await this.prisma.user.findMany({
+            where: {
+              userRoles: {
+                some: {
+                  role: { in: tier1Roles },
+                  status: RoleStatus.ACTIVE,
+                },
+              },
+            },
+            select: { id: true },
+          });
+
+          // Include property creator (if present) and all tier 1 users
+          const targetUserIds = Array.from(
+            new Set(
+              [updatedProperty.createdById, ...tier1Users.map((u) => u.id)].filter(
+                (id): id is number => typeof id === 'number',
+              ),
+            ),
+          );
+
+          for (const userId of targetUserIds) {
+            const notificationData = this.notificationService.preparePropertyApprovedNotification({
+              userId,
+              propertyId: updatedProperty.id,
+              propertyName: updatedProperty.name,
+              tokenId: result.data.tokenId,
+            });
+            await this.notificationQueueService.enqueueNotification(notificationData);
+          }
+        } catch (notificationError) {
+          // Log error but don't fail the operation
+          this.logger.error(
+            `Failed to queue property approved notification for property ${propertyId}:`,
+            notificationError,
+          );
+        }
       }
 
       // Send email notification only for 'register' action (not for 'update' from sync-blockchain)
       if (action === 'register') {
         try {
-          const actionUrl = `${process.env.WEBSITE_URL}/properties/${propertyRecord.id}/add-info`;
+          const actionUrl = `${process.env.WEBSITE_URL}/properties/${existingProperty.id}/add-info`;
 
           await this.emailService.sendEmail(EmailType.BLOCKCHAIN_TRANSACTION_COMPLETED, {
             recipientEmail: userEmail,
@@ -1785,53 +2379,104 @@ export class PropertyService {
       throw err;
     }
   }
-
   async uploadAttachments(
     propertyId: number,
     files: Express.Multer.File[],
-    currentUser: AuthedReq['user'],
-  ): Promise<Attachment[]> {
+    currentUser: UserResponseDto,
+    isPropertyPhoto: boolean,
+  ): Promise<PropertyAttachment[]> {
     await this.checkPropertyPermission(propertyId, currentUser);
 
-    const uploadedAttachments: Attachment[] = [];
-
-    for (const file of files) {
-      try {
-        // Upload file to S3
-        const fileUrl = await this.s3Service.uploadFile(file);
-
-        // Save attachment record to database
-        const attachment = await this.prisma.attachment.create({
-          data: {
-            fileName: file.originalname,
-            fileSize: file.size,
-            fileType: file.mimetype,
-            filePath: fileUrl,
-            propertyId: propertyId,
-          },
-        });
-
-        uploadedAttachments.push(attachment);
-        this.logger.log(
-          `Attachment uploaded successfully: ${file.originalname} for property ${propertyId}`,
-        );
-      } catch (error) {
-        this.logger.error(`Failed to upload attachment ${file.originalname}:`, error);
-        throw new BadRequestException(`Failed to upload file: ${file.originalname}`);
-      }
+    if (!files?.length) {
+      return [];
     }
-    await this.activityService.logActivity({
-      action: ActivityActions.PROPERTY_REMOVE_ATTACHMENT,
-      entityId: propertyId ?? undefined,
-      entityType: ActivityEntityTypes.PROPERTY,
-      description: `Upload attachments to property.`,
-      metadata: uploadedAttachments.map((attachment) => ({
-        name: attachment.fileName,
-        propertyId: propertyId,
-        url: attachment.filePath,
-      })),
+
+    /**
+     * 1️⃣ Upload files to S3 (cannot be transactional)
+     */
+    let uploadedFiles: { file: Express.Multer.File; filePath: string }[];
+
+    try {
+      uploadedFiles = await Promise.all(
+        files.map(async (file) => ({
+          file,
+          filePath: await this.s3Service.uploadFile(file),
+        })),
+      );
+    } catch (error) {
+      this.logger.error('S3 upload failed', error);
+      throw new BadRequestException('Failed to upload one or more files.');
+    }
+
+    /**
+     * 2️⃣ Database transaction
+     */
+    return await this.prisma.$transaction(async (tx) => {
+      /**
+       * Create attachments
+       */
+      await tx.attachment.createMany({
+        data: uploadedFiles.map(({ file, filePath }) => ({
+          fileName: file.originalname,
+          fileSize: file.size,
+          fileType: file.mimetype,
+          filePath,
+          propertyId,
+        })),
+      });
+
+      /**
+       * Fetch created attachments
+       * (createMany doesn't return rows)
+       */
+      const createdAttachments = await tx.attachment.findMany({
+        where: {
+          propertyId,
+          filePath: {
+            in: uploadedFiles.map((f) => f.filePath),
+          },
+        },
+      });
+
+      const uploadedAttachmentIds = createdAttachments.map((a) => a.id);
+
+      /**
+       * Update PropertyOtherInfo
+       */
+      if (uploadedAttachmentIds.length) {
+        const data: any = {
+          attachmentIds: { push: uploadedAttachmentIds },
+        };
+
+        if (isPropertyPhoto) {
+          data.imageIds = { push: uploadedAttachmentIds };
+        }
+
+        await tx.propertyOtherInfo.update({
+          where: { propertyRecordId: propertyId },
+          data,
+        });
+      }
+
+      /**
+       * Log activity
+       */
+      await this.activityService.logActivity({
+        action: ActivityActions.PROPERTY_ADD_ATTACHMENT,
+        entityId: propertyId,
+        entityType: ActivityEntityTypes.PROPERTY,
+        description: 'Uploaded attachments to property.',
+        metadata: createdAttachments.map((attachment) => ({
+          name: attachment.fileName,
+          propertyId,
+          url: attachment.filePath,
+        })),
+      });
+      if (!isPropertyPhoto) {
+        await this.syncPropertyToBlockchain(propertyId, currentUser);
+      }
+      return createdAttachments;
     });
-    return uploadedAttachments;
   }
 
   async getInvitedUsers(
@@ -1849,7 +2494,10 @@ export class PropertyService {
 
     const grouped = await this.prisma.userInviteRole.groupBy({
       by: ['userInviteId'],
-      where: { propertyId },
+      where: {
+        propertyId,
+        status: 'PENDING',
+      },
       _max: { createdAt: true },
       orderBy: { _max: { createdAt: 'desc' } },
       skip,
@@ -1867,7 +2515,11 @@ export class PropertyService {
     }
 
     const inviteRoles = await this.prisma.userInviteRole.findMany({
-      where: { propertyId, userInviteId: { in: userInviteIds } },
+      where: {
+        propertyId,
+        userInviteId: { in: userInviteIds },
+        status: 'PENDING',
+      },
       include: {
         userInvite: { select: { id: true, email: true } },
       },
@@ -1894,7 +2546,10 @@ export class PropertyService {
 
     const totalCount = await this.prisma.userInviteRole.groupBy({
       by: ['userInviteId'],
-      where: { propertyId },
+      where: {
+        propertyId,
+        status: 'PENDING',
+      },
       _count: { userInviteId: true },
     });
 
@@ -1992,10 +2647,39 @@ export class PropertyService {
     });
   }
 
+  async getPropertyInvitedUsersAndActiveUsers(
+    propertyId: number,
+  ): Promise<PropertyAllUsersResponse[]> {
+    // Fetch the latest invited roles per userInvite
+    const grouped = await this.prisma.userInviteRole.groupBy({
+      by: ['userInviteId'],
+      where: { propertyId },
+      _max: { createdAt: true },
+      orderBy: { _max: { createdAt: 'desc' } },
+    });
+    const userInviteIds = grouped.map((g) => g.userInviteId);
+
+    const propertyInvitedRoles = await this.prisma.userInviteRole.findMany({
+      where: { propertyId, userInviteId: { in: userInviteIds } },
+      include: { userInvite: { select: { id: true, email: true } } },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const propertyUsers = propertyInvitedRoles.map((pu) => ({
+      id: pu.id,
+      email: pu.userInvite.email,
+      role: pu.role,
+      status: pu.status,
+      verified: true,
+    }));
+
+    return propertyUsers;
+  }
+
   async deletePropertyUser(propertyId: number, userId: number, currentUserId: number) {
     const property = await this.prisma.property.findUnique({
       where: { id: propertyId },
-      select: { id: true, createdById: true },
+      select: { id: true, createdById: true, name: true },
     });
 
     if (!property) {
@@ -2018,10 +2702,263 @@ export class PropertyService {
       where: { id: propertyUser.id },
     });
 
+    // Send notification to the removed user
+    try {
+      const notificationData = this.notificationService.preparePropertyUserRemovedNotification({
+        userId: userId,
+        propertyId: propertyId,
+        propertyName: property.name,
+        removedBy: currentUserId,
+      });
+      await this.notificationQueueService.enqueueNotification(notificationData);
+    } catch (notificationError) {
+      // Log error but don't fail the operation
+      this.logger.error(
+        `Failed to queue notification for removed user ${userId} from property ${propertyId}:`,
+        notificationError,
+      );
+    }
+
     return {
       message: `User ${userId} has been removed from property ${propertyId}`,
       deletedUserId: userId,
       propertyId,
     };
+  }
+
+  async generatePropertyReport(propertyId: number): Promise<Buffer> {
+    this.logger.log(`Starting property report generation for property ${propertyId}`);
+
+    try {
+      // Fetch property with all necessary relations in a single query
+      const property = await this.prisma.property.findUnique({
+        where: { id: propertyId },
+        include: {
+          ownerInfo: true,
+          otherInfo: true,
+          propertyAddress: true,
+          types: true,
+          propertyUsers: { include: { user: true, userRole: true } },
+          attachments: true,
+          documents: true,
+          createdBy: true,
+          inviteRoles: true,
+        },
+      });
+
+      if (!property) throw new NotFoundException('Property not found');
+
+      // Fetch activity logs
+      const allLogs = await this.activityService.getLogsByProperty(propertyId);
+      const thirtyDaysAgo = dayjs().subtract(30, 'day');
+
+      const filteredLogs: { date: string; entries: ActivityEntryForReport[] }[] = allLogs
+        .map((group) => {
+          const entries: ActivityEntryForReport[] = group.entries
+            .filter((entry) => dayjs(entry.createdAt).isAfter(thirtyDaysAgo))
+            .map((entry) => ({
+              createdAt: entry.createdAt,
+              userName: entry.user?.fullname ?? 'Unknown',
+              description: entry.description ?? '',
+            }));
+
+          return { date: group.date, entries };
+        })
+        .filter((group) => group.entries.length > 0);
+
+      // Get primary property image
+      const propertyImageId = property.otherInfo?.imageIds?.[0];
+      const propertyImage =
+        property.attachments?.find((att) => att.id === propertyImageId)?.filePath ?? null;
+
+      // Fetch the latest invited roles per userInvite
+      const grouped = await this.prisma.userInviteRole.groupBy({
+        by: ['userInviteId'],
+        where: { propertyId },
+        _max: { createdAt: true },
+        orderBy: { _max: { createdAt: 'desc' } },
+      });
+      const userInviteIds = grouped.map((g) => g.userInviteId);
+
+      const propertyInvitedRoles = await this.prisma.userInviteRole.findMany({
+        where: { propertyId, userInviteId: { in: userInviteIds } },
+        include: { userInvite: { select: { id: true, email: true } } },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      const propertyUsers = propertyInvitedRoles.map((pu) => ({
+        email: pu.userInvite.email,
+        role: UserRoleLabels[pu.role] || pu.role,
+        status: PropertyUSerInviteStatusLabels[pu.status] || pu.status,
+        verified: true,
+      }));
+
+      // Filter attachments based on allowed IDs
+      const allowedIds = new Set(property.otherInfo?.attachmentIds ?? []);
+      const attachments = property.attachments
+        .filter((att) => allowedIds.has(att.id))
+        .map((att) => ({
+          type: att.fileType?.split('/')[1] ?? null,
+          name: att.fileName,
+          url: att.filePath,
+        }));
+
+      // Prepare template data
+      const templateData = {
+        report: {
+          issueDate: dayjs().format('MM/DD/YYYY'),
+          createdBy: property.createdBy?.fullName ?? 'N/A',
+        },
+        owner: {
+          name: property.ownerInfo?.name,
+          verified: true,
+          phone: property.ownerInfo?.phoneNumber,
+          email: property.ownerInfo?.email,
+        },
+        property: {
+          title: property.name,
+          description: property.otherInfo?.propertyDescription,
+          address: property.propertyAddress?.formatedAddress,
+          zoning: property.propertyAddress?.zipCode,
+          assetType: property.types.map((t) => PropertyTypeLabels[t.type] || t.type).join(', '),
+          squareFootage: property.otherInfo?.grossBuildingArea
+            ? `${Number(property.otherInfo.grossBuildingArea).toFixed(2)} sq. ft`
+            : '',
+          imageUrl: propertyImage,
+        },
+        activity: {
+          rows: this.splitLogsIntoColumns(filteredLogs),
+        },
+        fingerprintScore: property.completenessScore,
+        attachments,
+        users: propertyUsers,
+      };
+
+      const html = PropertyReportTemplates.report(templateData);
+      const headerHtml = PropertyReportTemplates.header(templateData);
+      const footerHtml = PropertyReportTemplates.footer(templateData);
+
+      const browser = await getBrowser();
+      this.logger.log('Browser launched successfully');
+
+      const page = await browser.newPage();
+      this.logger.log('New page created');
+
+      try {
+        await page.setContent(html, { waitUntil: 'networkidle0' });
+        this.logger.log('HTML content set successfully');
+
+        const pdfBuffer = await page.pdf({
+          format: 'A4',
+          printBackground: true,
+          displayHeaderFooter: true,
+          headerTemplate: headerHtml,
+          footerTemplate: footerHtml,
+          preferCSSPageSize: false,
+          margin: {
+            top: '100px',
+            bottom: '120px',
+          },
+        });
+        this.logger.log('PDF generated successfully');
+
+        return Buffer.from(pdfBuffer);
+      } finally {
+        await page.close();
+      }
+    } catch (error) {
+      this.logger.error(
+        `Failed to generate property report: ${error instanceof Error ? error.message : String(error)}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      throw error;
+    }
+  }
+
+  splitLogsIntoColumns(filteredGroups: ActivityGroup[]): ActivityRow[] {
+    const now = dayjs();
+    const fifteenDaysAgo = now.subtract(15, 'day');
+    const thirtyDaysAgo = now.subtract(30, 'day');
+
+    const recent: typeof filteredGroups = [];
+    const older: typeof filteredGroups = [];
+
+    for (const group of filteredGroups) {
+      const groupDate = dayjs(group.date, 'MMMM D, YYYY');
+
+      if (groupDate.isAfter(fifteenDaysAgo)) {
+        recent.push(group);
+      } else if (groupDate.isAfter(thirtyDaysAgo)) {
+        older.push(group);
+      }
+    }
+
+    const formatGroups = (groups: typeof filteredGroups) =>
+      groups.map((group) => ({
+        date: dayjs(group.date).format('MMMM D, YYYY'),
+        entries: group.entries.map((entry) => ({
+          time: dayjs(entry.createdAt).format('h:mm A'),
+          user: entry.userName,
+          description: entry.description ?? '',
+        })),
+      }));
+
+    const splitIntoTwoColumns = (groups: ReturnType<typeof formatGroups>) => {
+      const midPoint = Math.ceil(groups.length / 2);
+      const leftColumn = groups.slice(0, midPoint);
+      const rightColumn = groups.slice(midPoint);
+
+      return { leftColumn, rightColumn };
+    };
+
+    const buildRange = (from: dayjs.Dayjs, to: dayjs.Dayjs) =>
+      `${from.format('MMM DD')} - ${to.format('MMM DD')}`;
+
+    const formattedRecent = formatGroups(recent);
+    const formattedOlder = formatGroups(older);
+
+    const recentColumns = splitIntoTwoColumns(formattedRecent);
+    const olderColumns = splitIntoTwoColumns(formattedOlder);
+
+    return [
+      {
+        title: 'Recent Activity (Last 15 Days)',
+        columns: [
+          {
+            data: recentColumns.leftColumn,
+            dateRange: buildRange(fifteenDaysAgo, now),
+          },
+          {
+            data: recentColumns.rightColumn,
+            dateRange: buildRange(fifteenDaysAgo, now),
+          },
+        ],
+      },
+      {
+        title: 'Previous Activity (Days 16-30)',
+        columns: [
+          {
+            data: olderColumns.leftColumn,
+            dateRange: buildRange(thirtyDaysAgo, fifteenDaysAgo.subtract(1, 'day')),
+          },
+          {
+            data: olderColumns.rightColumn,
+            dateRange: buildRange(thirtyDaysAgo, fifteenDaysAgo.subtract(1, 'day')),
+          },
+        ],
+      },
+    ];
+  }
+
+  async getUpdatedCompletenessScore(propertyId: number, minScore: number): Promise<number> {
+    const existing = await this.prisma.property.findUnique({
+      where: { id: propertyId },
+      select: { completenessScore: true },
+    });
+
+    const currentScore =
+      existing?.completenessScore != null ? Number(existing.completenessScore) : 0;
+
+    return Math.max(currentScore, minScore);
   }
 }
