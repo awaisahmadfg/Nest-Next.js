@@ -1,5 +1,4 @@
 'use client';
-
 import React from 'react';
 import { Box, Typography, Grid } from '@mui/material';
 import { OpenInNew as OpenInNewIcon } from '@mui/icons-material';
@@ -13,7 +12,6 @@ interface BlockchainDetailsProps {
   chain?: string;
   metadataCid?: string;
 }
-
 const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
   contractAddress,
   tokenId,
