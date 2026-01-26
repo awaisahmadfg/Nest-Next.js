@@ -22,7 +22,6 @@ const BlockchainDetails: React.FC<BlockchainDetailsProps> = ({
   const defaultContractAddress = process.env.NEXT_PUBLIC_SMART_TAGS_CONTRACT_ADDRESS;
 
   const etherscanBaseUrl = process.env.NEXT_PUBLIC_ETHERSCAN_BASE_URL;
-
   const finalContractAddress = (contractAddress || defaultContractAddress) as string;
 
   const handleContractAddressClick = () => {
